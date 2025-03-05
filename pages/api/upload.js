@@ -23,27 +23,29 @@ async function extractText(buffer, mimeType) {
 }
 
 async function uploadToGCS(file, storage) {
-  const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
-  console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
+  try {
+    const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
+    console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
 
-  // Generate a unique filename to prevent collisions
-  const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
-  const blob = bucket.file(uniqueFilename);
+    // Generate a unique filename to prevent collisions
+    const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
+    const blob = bucket.file(uniqueFilename);
 
-  return new Promise((resolve, reject) => {
-    const blobStream = blob.createWriteStream({
-      resumable: false,
+    // Upload directly using buffer without setting ACL
+    await blob.save(file.buffer, {
       contentType: file.mimetype,
+      metadata: {
+        cacheControl: 'public, max-age=31536000',
+      },
     });
 
-    blobStream.on('error', reject);
-    blobStream.on('finish', () => {
-      const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${uniqueFilename}`;
-      resolve(publicUrl);
-    });
-
-    blobStream.end(file.buffer);
-  });
+    // Construct the URL using the bucket's public URL
+    const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${uniqueFilename}`;
+    return publicUrl;
+  } catch (error) {
+    console.error('GCS upload error:', error);
+    throw new Error(`Failed to upload to GCS: ${error.message}`);
+  }
 }
 
 export default async function handler(req, res) {
@@ -57,11 +59,12 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: `Method ${req.method} not allowed` });
   }
 
+  let responseWasSent = false;
+
   try {
     // Configure formidable to keep file data in memory
     const form = formidable({
       keepExtensions: true,
-      multiples: true,
       maxFileSize: 10 * 1024 * 1024, // 10MB
       filter: function ({ mimetype }) {
         // Accept only PDF and DOCX files
@@ -76,95 +79,82 @@ export default async function handler(req, res) {
 
     // Parse the form data
     const formData = await new Promise((resolve, reject) => {
-      const fileData = {
-        chunks: [],
-        info: null
-      };
+      let fileBuffer = null;
+      let fileInfo = null;
 
       form.onPart = (part) => {
         if (!part.mimetype) {
-          // Handle non-file parts normally
           form._handlePart(part);
           return;
         }
 
-        console.log('Receiving file part:', part.filename, part.mimetype);
-
-        // Store file info when we first see the part
-        fileData.info = {
-          originalFilename: part.filename,
-          mimetype: part.mimetype
-        };
+        const chunks = [];
         
         part.on('data', (chunk) => {
-          fileData.chunks.push(chunk);
+          chunks.push(chunk);
         });
 
         part.on('end', () => {
-          console.log('Finished receiving file part:', part.filename);
+          fileBuffer = Buffer.concat(chunks);
+          fileInfo = {
+            originalFilename: part.filename,
+            mimetype: part.mimetype,
+          };
         });
       };
 
       form.parse(req, (err, fields) => {
         if (err) {
-          console.error('Formidable error:', err);
           reject(err);
           return;
         }
 
-        // Only create the file object if we have both info and chunks
-        if (fileData.info && fileData.chunks.length > 0) {
-          const buffer = Buffer.concat(fileData.chunks);
-          console.log('File assembled:', fileData.info.originalFilename, 'Size:', buffer.length);
-          resolve({
-            fields,
-            file: {
-              ...fileData.info,
-              buffer
-            }
-          });
-        } else {
-          console.log('No valid file data received');
+        if (!fileBuffer || !fileInfo) {
           resolve({ fields, file: null });
+          return;
         }
+
+        resolve({
+          fields,
+          file: {
+            ...fileInfo,
+            buffer: fileBuffer
+          }
+        });
       });
     });
 
     if (!formData.file) {
-      console.log('No file in form data');
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const file = formData.file;
-    console.log('Processing file:', file.originalFilename, 'Type:', file.mimetype);
+    // Initialize Google Cloud Storage
+    const storage = new Storage();
 
-    try {
-      // Extract text from the file based on mimeType
-      const extractedText = await extractText(file.buffer, file.mimetype);
-      console.log('Text extracted successfully, length:', extractedText?.length || 0);
+    // Process everything in sequence
+    const extractedText = await extractText(formData.file.buffer, formData.file.mimetype);
+    const publicUrl = await uploadToGCS(formData.file, storage);
+    await saveToSheet({ 
+      name: formData.file.originalFilename, 
+      content: extractedText 
+    });
 
-      // Initialize Google Cloud Storage and upload file
-      const storage = new Storage();
-      const publicUrl = await uploadToGCS(file, storage);
-      console.log('File uploaded to:', publicUrl);
-
-      // Save the extracted text to Google Sheets
-      await saveToSheet({ name: file.originalFilename, content: extractedText });
-      console.log('Data saved to Google Sheets');
-      
-      // Send the success response
-      return res.status(200).json({ 
-        url: publicUrl, 
+    if (!responseWasSent) {
+      responseWasSent = true;
+      return res.status(200).json({
+        url: publicUrl,
         extractedText,
-        filename: file.originalFilename
+        filename: formData.file.originalFilename
       });
-
-    } catch (error) {
-      console.error('Processing error:', error);
-      return res.status(500).json({ error: "Error processing file: " + error.message });
     }
+
   } catch (error) {
-    console.error('Main error:', error);
-    return res.status(500).json({ error: error.message });
+    console.error('Error:', error);
+    if (!responseWasSent) {
+      responseWasSent = true;
+      return res.status(500).json({ 
+        error: `Error processing file: ${error.message}` 
+      });
+    }
   }
 }
