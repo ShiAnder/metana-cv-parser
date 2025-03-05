@@ -22,6 +22,30 @@ async function extractText(buffer, mimeType) {
   return null;
 }
 
+async function uploadToGCS(file, storage) {
+  const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
+  console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
+
+  // Generate a unique filename to prevent collisions
+  const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
+  const blob = bucket.file(uniqueFilename);
+
+  return new Promise((resolve, reject) => {
+    const blobStream = blob.createWriteStream({
+      resumable: false,
+      contentType: file.mimetype,
+    });
+
+    blobStream.on('error', reject);
+    blobStream.on('finish', () => {
+      const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${uniqueFilename}`;
+      resolve(publicUrl);
+    });
+
+    blobStream.end(file.buffer);
+  });
+}
+
 export default async function handler(req, res) {
   // Log request details
   console.log('Request method:', req.method);
@@ -119,54 +143,28 @@ export default async function handler(req, res) {
       const extractedText = await extractText(file.buffer, file.mimetype);
       console.log('Text extracted successfully, length:', extractedText?.length || 0);
 
-      // Initialize Google Cloud Storage
+      // Initialize Google Cloud Storage and upload file
       const storage = new Storage();
-      const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
-      console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
+      const publicUrl = await uploadToGCS(file, storage);
+      console.log('File uploaded to:', publicUrl);
 
-      // Generate a unique filename to prevent collisions
-      const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
-      const blob = bucket.file(uniqueFilename);
-      const blobStream = blob.createWriteStream({
-        resumable: false,
-        contentType: file.mimetype,
+      // Save the extracted text to Google Sheets
+      await saveToSheet({ name: file.originalFilename, content: extractedText });
+      console.log('Data saved to Google Sheets');
+      
+      // Send the success response
+      return res.status(200).json({ 
+        url: publicUrl, 
+        extractedText,
+        filename: file.originalFilename
       });
-
-      blobStream.on('error', (err) => {
-        console.error('Blob stream error:', err);
-        res.status(500).json({ error: err.message });
-      });
-
-      blobStream.on('finish', async () => {
-        const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${uniqueFilename}`;
-        console.log('File uploaded to:', publicUrl);
-
-        // Save the extracted text to Google Sheets
-        try {
-          await saveToSheet({ name: file.originalFilename, content: extractedText });
-          console.log('Data saved to Google Sheets');
-          
-          // Send the response with the URL and the extracted text
-          res.status(200).json({ 
-            url: publicUrl, 
-            extractedText,
-            filename: file.originalFilename
-          });
-        } catch (error) {
-          console.error('Google Sheets error:', error);
-          res.status(500).json({ error: "Error saving to Google Sheets: " + error.message });
-        }
-      });
-
-      // Write the buffer directly to Google Cloud Storage
-      blobStream.end(file.buffer);
 
     } catch (error) {
       console.error('Processing error:', error);
-      res.status(500).json({ error: "Error processing file: " + error.message });
+      return res.status(500).json({ error: "Error processing file: " + error.message });
     }
   } catch (error) {
     console.error('Main error:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 }
