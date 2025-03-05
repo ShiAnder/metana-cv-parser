@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "metana-test-2",
+  "private_key_id": "448f3e214a5a8522cee4b773142e5906a3b42873",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDJ2oXvnWaHBW41\n8g5BuIZNLNY1MK/VOzi+pMc0YSWBG+TUr4gN5Jg3dLig472zejrDdOk9pmVLM+vN\nz6oSaEZKNrRdBF7oLmUpa/8VFrxG1qNq1bYyHNlPYGbKmlHCDLLB6PHl/NvNcEyj\n4z1pYvo0AOgq7XxOnF8Tftll79nr3IunvpfRPm4mY3dOAyWw4crqL0GdDdtGAOlC\njq6UGips4ZtW5GIHWeBOfjl6Gz1IZmanLrsGdrazBd7jWXWNq2lbwe99549Rrntw\ntenWREpszqI9CQips6N4+DC7GTcMLVR9hyJM5V8XTO8A2qnsrvANeEbHGxuVOxVz\nu2Nu9PgZAgMBAAECggEABFAfngHTy7+Ofgvydq4Z2WLMnw+vuGgMknOtq9Q82TuO\nhoq5MAep/a0RU0eZUnW99THVj0ezp7uY9FvMUQgoR3i91X1mBnUULn23ttWbIsTH\nhMHVLPUnxj8F5GO0GHEbX/ursPGFhBXFOpg8zThp77LhZ6ZEU5YajT/EcDAM1fHl\noGzAIUm9h+CeIkBbvGz4l56Ro0ugvkFmuVp6QPdaPxYIawdzDStgwyfGSc8R0gU+\n67BfIdG1oNQKHTKpcYWwzb3c30cysCYri1SijLqF/Ejfk7amrzr7nZLGCcWKrSQL\nERR0gjdiguS3OqQklyIaJM9ob8kDbEuAIclvEY12fQKBgQD+3B2sXfuEz8wt8O8P\nzNr0qy+YLZnVK1uRKFAx/yZl5/Re0+eg1+tXI3fuw1S2/jeAsq0Plkn2X5z0LJh+\n+rfe69uiwqSIYAgOzZdnS9+aBtyhvCUdVcGfJQ3Nbu8sEy6L+HU8V2GQlcvZMvGs\np8sN/1/9h5aFshXTg9AGtVygtQKBgQDKwbNfwLho7aC+xkHjuKlh5nyWrQhuGFI7\ndwgZYC8fxlsqkkbQDMgYVsGhAc7TV8wfoCmIgwBHLYD3s9z3gbWk2myfOH2Nwkf8\nDI0aMppBAemXddWAhS1L+XtEopNT6kjAukc36ezy9ZOUT/5SxQPTNfjFSsUqgwtg\nYCfmhJKsVQKBgQDwm36oLFI4oLVy6fPIRu6v7q2QTfzdc4GPGTAdA3WM39+lZwlW\noIJeUe34TBC+cmKT7hvUi15oavwSycdumeTdYG6Kypfq6D6zOwWlT8xZ7gB98NJZ\nT4zsYl8Vg5XpVnKrUnXb8eL6TXGWLLJc/kyFeoN1J3zD280fU2Ih8zbvwQKBgGGc\nlT2Q63bgh9WwXsJCAZG3Q93KWdee79/e81A8JRO4C+XX3C2HKcHF6pwX4bmPeB71\nnWkyIC0kNAWMWuHxWUCPQ2H38UIQ+VTXugqVt/t57zpSqUGhW+hKqFSnrCPnE7Vt\nOKIrhT6GidEKHdc9MBU705Mv5vILequgPzVUN8StAoGAY5RtiLiTG0MIN65Hmoj+\nQwIdQIR9w/4H59W0NmAzJsLXCjVTc8igvMICisWvYbN1F7kcvFTPFPUmyTUCH/Ka\nDVZvddQ68hHWGMOSUPVluEkwBqu5ppzupbAFl0zBrNxbVEg/MciaB0530BuZ+E0m\nGutVjjIU7WRHfRt4xUhi0NM=\n-----END PRIVATE KEY-----\n",
+  "client_email": "metana-test-2@metana-test-2.iam.gserviceaccount.com",
+  "client_id": "111804433183369494169",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/metana-test-2%40metana-test-2.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
