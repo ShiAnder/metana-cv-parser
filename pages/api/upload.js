@@ -23,10 +23,14 @@ async function extractText(buffer, mimeType) {
 }
 
 export default async function handler(req, res) {
+  // Log request details
   console.log('Request method:', req.method);
+  console.log('Request headers:', req.headers);
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+  // Ensure it's a POST request
+  if (req.method.toUpperCase() !== "POST") {
+    console.log('Method not allowed:', req.method);
+    return res.status(405).json({ error: `Method ${req.method} not allowed` });
   }
 
   try {
@@ -37,10 +41,12 @@ export default async function handler(req, res) {
       maxFileSize: 10 * 1024 * 1024, // 10MB
       filter: function ({ mimetype }) {
         // Accept only PDF and DOCX files
-        return mimetype && (
+        const isAllowed = mimetype && (
           mimetype.includes('pdf') ||
           mimetype.includes('document')
         );
+        console.log('File type check:', mimetype, isAllowed ? 'allowed' : 'rejected');
+        return isAllowed;
       }
     });
 
@@ -58,6 +64,8 @@ export default async function handler(req, res) {
           return;
         }
 
+        console.log('Receiving file part:', part.filename, part.mimetype);
+
         // Store file info when we first see the part
         fileData.info = {
           originalFilename: part.filename,
@@ -66,6 +74,10 @@ export default async function handler(req, res) {
         
         part.on('data', (chunk) => {
           fileData.chunks.push(chunk);
+        });
+
+        part.on('end', () => {
+          console.log('Finished receiving file part:', part.filename);
         });
       };
 
@@ -79,6 +91,7 @@ export default async function handler(req, res) {
         // Only create the file object if we have both info and chunks
         if (fileData.info && fileData.chunks.length > 0) {
           const buffer = Buffer.concat(fileData.chunks);
+          console.log('File assembled:', fileData.info.originalFilename, 'Size:', buffer.length);
           resolve({
             fields,
             file: {
@@ -87,12 +100,14 @@ export default async function handler(req, res) {
             }
           });
         } else {
+          console.log('No valid file data received');
           resolve({ fields, file: null });
         }
       });
     });
 
     if (!formData.file) {
+      console.log('No file in form data');
       return res.status(400).json({ error: "No file uploaded" });
     }
 
@@ -102,11 +117,12 @@ export default async function handler(req, res) {
     try {
       // Extract text from the file based on mimeType
       const extractedText = await extractText(file.buffer, file.mimetype);
-      console.log('Text extracted successfully');
+      console.log('Text extracted successfully, length:', extractedText?.length || 0);
 
       // Initialize Google Cloud Storage
       const storage = new Storage();
       const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
+      console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
 
       // Generate a unique filename to prevent collisions
       const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
@@ -131,7 +147,11 @@ export default async function handler(req, res) {
           console.log('Data saved to Google Sheets');
           
           // Send the response with the URL and the extracted text
-          res.status(200).json({ url: publicUrl, extractedText });
+          res.status(200).json({ 
+            url: publicUrl, 
+            extractedText,
+            filename: file.originalFilename
+          });
         } catch (error) {
           console.error('Google Sheets error:', error);
           res.status(500).json({ error: "Error saving to Google Sheets: " + error.message });
