@@ -22,20 +22,45 @@ async function extractText(filePath, mimeType) {
 }
 
 export default async function handler(req, res) {
+  console.log('Request method:', req.method);
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const form = formidable();
-  form.parse(req, async (err, _, files) => {
-    if (err) return res.status(500).json({ error: "File parsing error" });
+  try {
+    const form = formidable({
+      uploadDir: './uploads',
+      keepExtensions: true,
+      multiples: true,
+    });
+
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) {
+          console.error('Formidable error:', err);
+          reject(err);
+          return;
+        }
+        resolve([fields, files]);
+      });
+    });
+
+    console.log('Files received:', files);
+
+    if (!files.file || !files.file[0]) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
 
     const file = files.file[0];
+    console.log('Processing file:', file.originalFilename, 'Type:', file.mimetype);
+
     const fileStream = fs.createReadStream(file.filepath);
 
     try {
       // Extract text from the file based on mimeType
       const extractedText = await extractText(file.filepath, file.mimetype);
+      console.log('Text extracted successfully');
 
       // Initialize Google Cloud Storage
       const storage = new Storage();
@@ -48,16 +73,20 @@ export default async function handler(req, res) {
       });
 
       blobStream.on('error', (err) => {
+        console.error('Blob stream error:', err);
         res.status(500).json({ error: err.message });
       });
 
       blobStream.on('finish', async () => {
         const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${file.originalFilename}`;
+        console.log('File uploaded to:', publicUrl);
 
         // Save the extracted text to Google Sheets
         try {
           await saveToSheet({ name: file.originalFilename, content: extractedText });
+          console.log('Data saved to Google Sheets');
         } catch (error) {
+          console.error('Google Sheets error:', error);
           return res.status(500).json({ error: "Error saving to Google Sheets: " + error.message });
         }
 
@@ -68,7 +97,11 @@ export default async function handler(req, res) {
       fileStream.pipe(blobStream);
 
     } catch (error) {
+      console.error('Processing error:', error);
       res.status(500).json({ error: "Error extracting text: " + error.message });
     }
-  });
+  } catch (error) {
+    console.error('Main error:', error);
+    res.status(500).json({ error: error.message });
+  }
 }
