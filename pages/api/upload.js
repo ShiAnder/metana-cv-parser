@@ -1,15 +1,17 @@
 import { Storage } from '@google-cloud/storage';
 import { formidable } from 'formidable';
-import fs from 'fs';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
-import saveToSheet from "@/lib/googleSheets";  // Import the saveToSheet function
+import saveToSheet from "@/lib/googleSheets";
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: {
+    bodyParser: false,
+    sizeLimit: '10mb',
+  },
+};
 
-async function extractText(filePath, mimeType) {
-  const buffer = fs.readFileSync(filePath);
-
+async function extractText(buffer, mimeType) {
   if (mimeType === 'application/pdf') {
     const data = await pdf(buffer);
     return data.text;
@@ -17,7 +19,6 @@ async function extractText(filePath, mimeType) {
     const data = await mammoth.extractRawText({ buffer });
     return data.value;
   }
-
   return null;
 }
 
@@ -29,24 +30,57 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Configure formidable to keep file data in memory
     const form = formidable({
-      uploadDir: './uploads',
       keepExtensions: true,
       multiples: true,
+      maxFileSize: 10 * 1024 * 1024, // 10MB
+      filter: function ({ mimetype }) {
+        // Accept only PDF and DOCX files
+        return mimetype && (
+          mimetype.includes('pdf') ||
+          mimetype.includes('document')
+        );
+      }
     });
 
+    // Parse the form data
     const [fields, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
+      const chunks = [];
+      
+      form.onPart = (part) => {
+        if (!part.mimetype) {
+          // Handle non-file parts normally
+          form._handlePart(part);
+          return;
+        }
+        
+        part.on('data', (chunk) => {
+          chunks.push(chunk);
+        });
+        
+        part.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          files = {
+            file: [{
+              originalFilename: part.filename,
+              mimetype: part.mimetype,
+              buffer: buffer
+            }]
+          };
+          resolve([fields, files]);
+        });
+      };
+
+      form.parse(req, (err, fields, _) => {
         if (err) {
           console.error('Formidable error:', err);
           reject(err);
-          return;
         }
-        resolve([fields, files]);
       });
     });
 
-    console.log('Files received:', files);
+    console.log('Files received:', files.file[0].originalFilename);
 
     if (!files.file || !files.file[0]) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -55,11 +89,9 @@ export default async function handler(req, res) {
     const file = files.file[0];
     console.log('Processing file:', file.originalFilename, 'Type:', file.mimetype);
 
-    const fileStream = fs.createReadStream(file.filepath);
-
     try {
       // Extract text from the file based on mimeType
-      const extractedText = await extractText(file.filepath, file.mimetype);
+      const extractedText = await extractText(file.buffer, file.mimetype);
       console.log('Text extracted successfully');
 
       // Initialize Google Cloud Storage
@@ -85,20 +117,21 @@ export default async function handler(req, res) {
         try {
           await saveToSheet({ name: file.originalFilename, content: extractedText });
           console.log('Data saved to Google Sheets');
+          
+          // Send the response with the URL and the extracted text
+          res.status(200).json({ url: publicUrl, extractedText });
         } catch (error) {
           console.error('Google Sheets error:', error);
-          return res.status(500).json({ error: "Error saving to Google Sheets: " + error.message });
+          res.status(500).json({ error: "Error saving to Google Sheets: " + error.message });
         }
-
-        // Send the response with the URL and the extracted text
-        res.status(200).json({ url: publicUrl, extractedText });
       });
 
-      fileStream.pipe(blobStream);
+      // Write the buffer directly to Google Cloud Storage
+      blobStream.end(file.buffer);
 
     } catch (error) {
       console.error('Processing error:', error);
-      res.status(500).json({ error: "Error extracting text: " + error.message });
+      res.status(500).json({ error: "Error processing file: " + error.message });
     }
   } catch (error) {
     console.error('Main error:', error);
