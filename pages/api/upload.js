@@ -45,48 +45,58 @@ export default async function handler(req, res) {
     });
 
     // Parse the form data
-    const [fields, files] = await new Promise((resolve, reject) => {
-      const chunks = [];
-      
+    const formData = await new Promise((resolve, reject) => {
+      const fileData = {
+        chunks: [],
+        info: null
+      };
+
       form.onPart = (part) => {
         if (!part.mimetype) {
           // Handle non-file parts normally
           form._handlePart(part);
           return;
         }
+
+        // Store file info when we first see the part
+        fileData.info = {
+          originalFilename: part.filename,
+          mimetype: part.mimetype
+        };
         
         part.on('data', (chunk) => {
-          chunks.push(chunk);
-        });
-        
-        part.on('end', () => {
-          const buffer = Buffer.concat(chunks);
-          files = {
-            file: [{
-              originalFilename: part.filename,
-              mimetype: part.mimetype,
-              buffer: buffer
-            }]
-          };
-          resolve([fields, files]);
+          fileData.chunks.push(chunk);
         });
       };
 
-      form.parse(req, (err, fields, _) => {
+      form.parse(req, (err, fields) => {
         if (err) {
           console.error('Formidable error:', err);
           reject(err);
+          return;
+        }
+
+        // Only create the file object if we have both info and chunks
+        if (fileData.info && fileData.chunks.length > 0) {
+          const buffer = Buffer.concat(fileData.chunks);
+          resolve({
+            fields,
+            file: {
+              ...fileData.info,
+              buffer
+            }
+          });
+        } else {
+          resolve({ fields, file: null });
         }
       });
     });
 
-    console.log('Files received:', files.file[0].originalFilename);
-
-    if (!files.file || !files.file[0]) {
+    if (!formData.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const file = files.file[0];
+    const file = formData.file;
     console.log('Processing file:', file.originalFilename, 'Type:', file.mimetype);
 
     try {
@@ -98,7 +108,9 @@ export default async function handler(req, res) {
       const storage = new Storage();
       const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
 
-      const blob = bucket.file(file.originalFilename);
+      // Generate a unique filename to prevent collisions
+      const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
+      const blob = bucket.file(uniqueFilename);
       const blobStream = blob.createWriteStream({
         resumable: false,
         contentType: file.mimetype,
@@ -110,7 +122,7 @@ export default async function handler(req, res) {
       });
 
       blobStream.on('finish', async () => {
-        const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${file.originalFilename}`;
+        const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${uniqueFilename}`;
         console.log('File uploaded to:', publicUrl);
 
         // Save the extracted text to Google Sheets
