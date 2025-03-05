@@ -3,6 +3,7 @@ import { formidable } from 'formidable';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 import saveToSheet from "@/lib/googleSheets";
+require('dotenv').config();
 
 export const config = {
   api: {
@@ -128,8 +129,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    // Initialize Google Cloud Storage
-    const storage = new Storage();
+    // Initialize Google Cloud Storage with credentials from environment variable
+    const storage = new Storage({
+      credentials: JSON.parse(process.env.GCS_CREDENTIALS),
+    });
 
     // Process everything in sequence
     const extractedText = await extractText(formData.file.buffer, formData.file.mimetype);
