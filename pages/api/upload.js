@@ -27,8 +27,19 @@ async function uploadToGCS(file, storage) {
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     console.log('Using GCS bucket:', process.env.GCS_BUCKET_NAME);
 
-    // Generate a unique filename to prevent collisions
-    const uniqueFilename = `${Date.now()}-${file.originalFilename}`;
+    // Ensure we have a valid filename and convert to string
+    const originalFilename = String(file.originalFilename || '');
+    if (!originalFilename || originalFilename === 'undefined') {
+      throw new Error('Invalid or missing filename');
+    }
+
+    // Sanitize the filename to remove any potentially problematic characters
+    const sanitizedFilename = originalFilename.replace(/[^a-zA-Z0-9.-]/g, '_');
+    
+    // Generate a unique filename while preserving the original name
+    const uniqueFilename = `${Date.now()}-${sanitizedFilename}`;
+    console.log('Uploading file with name:', uniqueFilename, 'Original name:', originalFilename);
+    
     const blob = bucket.file(uniqueFilename);
 
     // Upload directly using buffer without setting ACL
@@ -36,6 +47,7 @@ async function uploadToGCS(file, storage) {
       contentType: file.mimetype,
       metadata: {
         cacheControl: 'public, max-age=31536000',
+        originalFilename: originalFilename // Store original filename in metadata
       },
     });
 
@@ -81,12 +93,19 @@ export default async function handler(req, res) {
     const formData = await new Promise((resolve, reject) => {
       let fileBuffer = null;
       let fileInfo = null;
+      let fields = {};
 
       form.onPart = (part) => {
         if (!part.mimetype) {
+          // This is a non-file field
           form._handlePart(part);
           return;
         }
+
+        console.log('Received file part:', {
+          name: part.filename,
+          mimetype: part.mimetype
+        });
 
         const chunks = [];
         
@@ -97,22 +116,42 @@ export default async function handler(req, res) {
         part.on('end', () => {
           fileBuffer = Buffer.concat(chunks);
           fileInfo = {
-            originalFilename: part.filename,
+            originalFilename: String(part.filename || ''),
             mimetype: part.mimetype,
           };
+          console.log('File info after processing:', fileInfo);
         });
       };
 
-      form.parse(req, (err, fields) => {
+      form.parse(req, (err, parsedFields) => {
         if (err) {
           reject(err);
           return;
         }
 
+        fields = parsedFields;
+        console.log('Parsed fields:', fields);
+
         if (!fileBuffer || !fileInfo) {
           resolve({ fields, file: null });
           return;
         }
+
+        // Use the separately sent filename if available
+        if (fields.filename) {
+          fileInfo.originalFilename = String(fields.filename);
+        }
+
+        // Ensure filename is valid
+        if (!fileInfo.originalFilename || fileInfo.originalFilename === 'undefined') {
+          const extension = fileInfo.mimetype === 'application/pdf' ? '.pdf' : '.docx';
+          fileInfo.originalFilename = `unnamed-file-${Date.now()}${extension}`;
+        }
+
+        console.log('Final file info:', {
+          filename: fileInfo.originalFilename,
+          mimetype: fileInfo.mimetype
+        });
 
         resolve({
           fields,
@@ -134,28 +173,57 @@ export default async function handler(req, res) {
     });
 
     // Process everything in sequence
-    const extractedText = await extractText(formData.file.buffer, formData.file.mimetype);
-    const publicUrl = await uploadToGCS(formData.file, storage);
-    await saveToSheet({ 
-      name: formData.file.originalFilename, 
-      content: extractedText 
-    });
+    try {
+      const extractedText = await extractText(formData.file.buffer, formData.file.mimetype);
+      if (!extractedText) {
+        throw new Error('Failed to extract text from the file');
+      }
 
-    if (!responseWasSent) {
-      responseWasSent = true;
-      return res.status(200).json({
-        url: publicUrl,
-        extractedText,
-        filename: formData.file.originalFilename
+      const publicUrl = await uploadToGCS(formData.file, storage);
+      if (!publicUrl) {
+        throw new Error('Failed to upload file to Google Cloud Storage');
+      }
+
+      await saveToSheet({ 
+        name: formData.fields.name || 'N/A',
+        email: formData.fields.email || 'N/A',
+        phone: formData.fields.phone || 'N/A',
+        filename: formData.file.originalFilename,
+        content: extractedText 
       });
-    }
 
+      if (!responseWasSent) {
+        responseWasSent = true;
+        return res.status(200).json({
+          success: true,
+          url: publicUrl,
+          extractedText,
+          filename: formData.file.originalFilename,
+          name: formData.fields.name,
+          email: formData.fields.email,
+          phone: formData.fields.phone
+        });
+      }
+    } catch (processError) {
+      console.error('Processing error:', processError);
+      if (!responseWasSent) {
+        responseWasSent = true;
+        return res.status(500).json({ 
+          success: false,
+          error: processError.message || 'Error processing file',
+          details: process.env.NODE_ENV === 'development' ? processError.stack : undefined
+        });
+      }
+    }
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Request error:', error);
     if (!responseWasSent) {
       responseWasSent = true;
       return res.status(500).json({ 
-        error: `Error processing file: ${error.message}` 
+        success: false,
+        error: 'Error processing request',
+        message: error.message,
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   }
