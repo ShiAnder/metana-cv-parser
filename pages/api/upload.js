@@ -3,7 +3,6 @@ import { formidable } from 'formidable';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 import saveToSheet from "@/lib/googleSheets";
-require('dotenv').config();
 
 export const config = {
   api: {
