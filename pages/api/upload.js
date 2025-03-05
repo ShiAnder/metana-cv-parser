@@ -28,10 +28,10 @@ export default async function handler(req, res) {
 
   try {
     const form = formidable();
-    const [fields, files] = await new Promise((resolve, reject) => {
+    const [files] = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
         if (err) reject(err);
-        resolve([fields, files]);
+        resolve([files]);
       });
     });
 
