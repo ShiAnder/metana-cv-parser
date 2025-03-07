@@ -188,8 +188,8 @@ export default async function handler(req, res) {
         name: formData.fields.name || 'N/A',
         email: formData.fields.email || 'N/A',
         phone: formData.fields.phone || 'N/A',
-        filename: formData.file.originalFilename,
-        content: extractedText 
+        content: extractedText,
+        cvUrl: publicUrl
       });
 
       if (!responseWasSent) {
