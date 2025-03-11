@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { Storage } from '@google-cloud/storage';
 import saveToSheet from '../../lib/cvParser'; // Import the updated saveToSheet function
+import sendConfirmationEmail from '../../lib/emailSender'; // Import the email sender
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 
@@ -223,6 +224,15 @@ export default async function handler(req, res) {
       }
 
       console.log("This is the parsed data in upload.js:", parsedData);
+
+      // Send confirmation email
+      try {
+        await sendConfirmationEmail(fields.name, fields.email, originalFilename);
+        console.log("Confirmation email sent successfully");
+      } catch (emailError) {
+        console.error("Error sending confirmation email:", emailError);
+        // Continue with the response even if email sending fails
+      }
 
       // Return success response
       return res.status(200).json({ 
