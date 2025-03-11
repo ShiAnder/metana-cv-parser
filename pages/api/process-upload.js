@@ -1,320 +1,240 @@
 import { Storage } from '@google-cloud/storage';
 import saveToSheet from '../../lib/cvParser';
 import sendConfirmationEmail from '../../lib/emailSender';
-import { kv } from '@vercel/kv';
+import sendWebhook from '../../lib/webhookSender';
+import { redis } from '../../lib/redis';
 
 // This endpoint is designed to be called by a webhook or scheduled task
 // to continue processing an upload that may have been interrupted due to
 // Vercel serverless function timeout limits
 
 export default async function handler(req, res) {
-  // Set CORS headers
+  console.log('[Process Upload API] Called with method:', req.method);
+  
+  // Set CORS headers 
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
-
+  
   // Handle OPTIONS request
   if (req.method === 'OPTIONS') {
+    console.log('Handling OPTIONS preflight');
     return res.status(200).end();
   }
-
-  // Only allow POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ 
-      success: false, 
-      error: 'Method not allowed',
-      message: 'Only POST is allowed for this endpoint'
-    });
-  }
-
-  try {
-    // Get upload data from request body
-    const { uploadId, stage, fileBuffer, fileInfo, fields, extractedText } = req.body;
+  
+  // GET request to check status 
+  if (req.method === 'GET') {
+    const { id } = req.query;
     
-    if (!uploadId || !fileInfo) {
+    if (!id) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required data',
-        message: 'Upload ID and file information are required'
+        error: 'Missing id parameter',
+        message: 'Please provide an upload ID to check the status'
       });
     }
     
-    console.log(`[ProcessUpload] Continuing processing for upload ${uploadId} from stage ${stage || 'unknown'}`);
-    
-    // Send an immediate response to prevent timeout
-    res.status(202).json({
-      success: true,
-      message: 'Processing continuing in background',
-      uploadId,
-      stage: stage || 'continuing'
-    });
-    
-    // Check if there's already status in KV
-    const uploadKey = `upload:${uploadId}`;
-    let currentStatus;
+    console.log(`[Process Upload API] Checking status for upload ID: ${id}`);
     
     try {
-      currentStatus = await kv.get(uploadKey);
-      console.log(`[ProcessUpload] Retrieved current status from KV: ${JSON.stringify(currentStatus)}`);
-    } catch (kvError) {
-      console.error(`[ProcessUpload] Error retrieving status from KV: ${kvError.message}`);
-      // Create a new status if not found
-      currentStatus = { 
-        stage: stage || 'unknown',
-        progress: 0,
-        startTime: new Date().toISOString()
-      };
-    }
-    
-    // If no status was found, create an initial status
-    if (!currentStatus) {
-      console.log(`[ProcessUpload] No status found, creating initial status`);
-      currentStatus = { 
-        stage: stage || 'unknown',
-        progress: 0,
-        startTime: new Date().toISOString()
-      };
+      // Query Redis for the status
+      const uploadKey = `upload:${id}`;
+      const status = await redis.get(uploadKey);
       
-      try {
-        await kv.set(uploadKey, currentStatus);
-        await kv.expire(uploadKey, 3600); // 1 hour TTL
-      } catch (kvSetError) {
-        console.error(`[ProcessUpload] Error setting initial status: ${kvSetError.message}`);
+      if (!status) {
+        console.log(`[Process Upload API] No status found for upload ID: ${id}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Not found',
+          message: 'No upload found with this ID' 
+        });
       }
+      
+      console.log(`[Process Upload API] Retrieved status for ${id}:`, JSON.stringify(status));
+      return res.status(200).json({
+        success: true,
+        status
+      });
+    } catch (redisError) {
+      console.error(`[Process Upload API] Error retrieving status from Redis:`, redisError);
+      return res.status(500).json({
+        success: false,
+        error: 'Storage error',
+        message: 'Error retrieving upload status'
+      });
     }
-    
-    // Continue processing from the appropriate stage
+  }
+  
+  // POST request to continue processing
+  if (req.method === 'POST') {
     try {
-      let cvUrl = null;
-      let text = extractedText || null;
+      const { uploadId } = req.body;
       
-      // Process based on current stage
-      switch(stage) {
-        case 'received':
-          // Start from the beginning
-          // We would need the file buffer here, but it might be too large to pass
-          // In a production system, this would use a shared storage or database
-          console.log(`[ProcessUpload] Starting from beginning, but file buffer not available`);
-          
-          // Update status to show we're trying to process
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'processing_without_buffer',
-              progress: 15,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
-          break;
-          
-        case 'extracting_text':
-          // If text extraction was interrupted
-          // Same issue as above - we need the file buffer
-          console.log(`[ProcessUpload] Text extraction stage, but file buffer not available`);
-          
-          // Update status to show we're trying to process
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'processing_without_buffer',
-              progress: 25,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
-          break;
-          
-        case 'uploading_to_cloud':
-          // If the file upload was interrupted
-          // Same issue - would need file buffer
-          console.log(`[ProcessUpload] Upload stage, but file buffer not available`);
-          
-          // Update status to show we're trying to process
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'processing_without_buffer',
-              progress: 35,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
-          break;
-          
-        case 'saving_to_sheets':
-          // If Google Sheets saving was interrupted
-          console.log(`[ProcessUpload] Continuing with Google Sheets integration`);
-          
-          // Update status to show we're saving to sheets
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'saving_to_sheets',
-              progress: 65,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
-          
-          // Prepare data for processing
-          const parsedData = {
-            content: text || 'Text extraction not completed',
-            extractedText: text || 'Text extraction not completed',
-            cvUrl: fileInfo.gcsUrl || 'N/A',
-            name: fields.name,
-            email: fields.email,
-            phone: fields.phone,
-            filename: fileInfo.name,
-            mimeType: fileInfo.type,
-            size: fileInfo.size,
-            uploadDate: new Date().toISOString()
-          };
-          
-          // Save to Google Sheets
-          try {
-            await saveToSheet(parsedData);
-            console.log(`[ProcessUpload] Data saved to sheet successfully`);
-            
-            // Update status to show we're sending email
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'sending_email',
-              progress: 80,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (sheetError) {
-            console.error(`[ProcessUpload] Sheet error:`, sheetError);
-            
-            // Update status to show error
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'error',
-              error: `Sheet error: ${sheetError.message}`,
-              progress: 70,
-              lastUpdated: new Date().toISOString()
-            });
-            
-            throw sheetError;
-          }
-          
-          // Continue to next stage (sending email)
-          console.log(`[ProcessUpload] Sending confirmation email...`);
-          try {
-            await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
-            console.log(`[ProcessUpload] Email sent successfully`);
-            
-            // Update status to completed
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'completed',
-              progress: 100,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (emailError) {
-            console.error(`[ProcessUpload] Email error:`, emailError);
-            
-            // Even if email fails, mark as mostly completed
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'completed_without_email',
-              progress: 90,
-              error: `Email error: ${emailError.message}`,
-              lastUpdated: new Date().toISOString()
-            });
-          }
-          
-          console.log(`[ProcessUpload] Processing completed for upload ${uploadId}`);
-          break;
-          
-        case 'sending_email':
-          // If just the email sending was interrupted
-          console.log(`[ProcessUpload] Sending confirmation email...`);
-          
-          // Update status to show we're sending email
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'sending_email',
-              progress: 80,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
-          
-          try {
-            await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
-            console.log(`[ProcessUpload] Email sent successfully`);
-            
-            // Update status to completed
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'completed',
-              progress: 100,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (emailError) {
-            console.error(`[ProcessUpload] Email error:`, emailError);
-            
-            // Even if email fails, mark as mostly completed
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'completed_without_email',
-              progress: 90,
-              error: `Email error: ${emailError.message}`,
-              lastUpdated: new Date().toISOString()
-            });
-          }
-          
-          console.log(`[ProcessUpload] Processing completed for upload ${uploadId}`);
-          break;
-          
-        default:
-          console.log(`[ProcessUpload] Unknown stage ${stage}, unable to continue processing`);
-          
-          // Update status to show error with unknown stage
-          try {
-            await kv.set(uploadKey, {
-              ...currentStatus,
-              stage: 'error',
-              error: `Unknown stage: ${stage}`,
-              lastUpdated: new Date().toISOString()
-            });
-          } catch (kvUpdateError) {
-            console.error(`[ProcessUpload] Error updating status: ${kvUpdateError.message}`);
-          }
+      if (!uploadId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing upload ID',
+          message: 'Upload ID is required'
+        });
       }
       
-    } catch (processingError) {
-      console.error(`[ProcessUpload] Error continuing processing:`, processingError);
+      console.log(`[Process Upload API] Received processing request for upload ID: ${uploadId}`);
       
-      // Update status to show error
+      // Check if upload exists in Redis
+      const uploadKey = `upload:${uploadId}`;
+      const uploadData = await redis.get(uploadKey);
+      
+      if (!uploadData) {
+        console.log(`[Process Upload API] Upload not found: ${uploadId}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Upload not found',
+          message: 'No upload found with this ID'
+        });
+      }
+      
+      console.log(`[Process Upload API] Found upload data:`, JSON.stringify(uploadData));
+      
+      // Return a response immediately (we'll process in the background)
+      res.status(200).json({
+        success: true,
+        message: 'Processing started in the background',
+        uploadId
+      });
+      
+      // Update status to processing_without_buffer
       try {
-        await kv.set(uploadKey, {
+        const currentStatus = await redis.get(uploadKey) || {};
+        await redis.set(uploadKey, {
           ...currentStatus,
-          stage: 'error',
-          error: processingError.message,
+          stage: 'processing_without_buffer',
+          progress: 40,
           lastUpdated: new Date().toISOString()
         });
-      } catch (kvUpdateError) {
-        console.error(`[ProcessUpload] Error updating error status: ${kvUpdateError.message}`);
+        console.log(`[Process Upload API] Updated status to processing_without_buffer`);
+      } catch (redisError) {
+        console.error(`[Process Upload API] Error updating Redis status:`, redisError);
+      }
+      
+      // Background processing
+      try {
+        console.log('[Process Upload API] Starting background webhook processing');
+        
+        // Update status to saving_to_sheets
+        try {
+          const currentStatus = await redis.get(uploadKey) || {};
+          await redis.set(uploadKey, {
+            ...currentStatus,
+            stage: 'saving_to_sheets',
+            progress: 60,
+            lastUpdated: new Date().toISOString()
+          });
+          console.log(`[Process Upload API] Updated status to saving_to_sheets`);
+        } catch (redisError) {
+          console.error(`[Process Upload API] Error updating Redis status:`, redisError);
+        }
+        
+        // Send webhook if needed
+        let webhookSent = false;
+        try {
+          if (uploadData.fileInfo && uploadData.fields) {
+            console.log('[Process Upload API] Sending webhook');
+            webhookSent = await sendWebhook({
+              name: uploadData.fields.name,
+              email: uploadData.fields.email,
+              phone: uploadData.fields.phone,
+              fileName: uploadData.fileInfo.name,
+              fileSize: uploadData.fileInfo.size,
+              fileType: uploadData.fileInfo.type,
+              uploadDate: new Date().toISOString()
+            });
+            console.log(`[Process Upload API] Webhook sent: ${webhookSent}`);
+          }
+        } catch (webhookError) {
+          console.error('[Process Upload API] Webhook error:', webhookError);
+        }
+        
+        // Update status to sending_email
+        try {
+          const currentStatus = await redis.get(uploadKey) || {};
+          await redis.set(uploadKey, {
+            ...currentStatus,
+            stage: 'sending_email',
+            progress: 80,
+            webhookSent,
+            lastUpdated: new Date().toISOString()
+          });
+          console.log(`[Process Upload API] Updated status to sending_email`);
+        } catch (redisError) {
+          console.error(`[Process Upload API] Error updating Redis status:`, redisError);
+        }
+        
+        // Send email if we have the necessary data
+        if (uploadData.fields && uploadData.fields.email) {
+          try {
+            console.log('[Process Upload API] Sending confirmation email');
+            await sendConfirmationEmail(
+              uploadData.fields.name,
+              uploadData.fields.email,
+              uploadData.fileInfo.name
+            );
+            console.log('[Process Upload API] Email sent successfully');
+          } catch (emailError) {
+            console.error('[Process Upload API] Email error:', emailError);
+          }
+        }
+        
+        // Update final status
+        try {
+          const currentStatus = await redis.get(uploadKey) || {};
+          await redis.set(uploadKey, {
+            ...currentStatus,
+            stage: 'completed',
+            progress: 100,
+            lastUpdated: new Date().toISOString()
+          });
+          console.log(`[Process Upload API] Updated status to completed`);
+        } catch (redisError) {
+          console.error(`[Process Upload API] Error updating final Redis status:`, redisError);
+        }
+        
+        console.log('[Process Upload API] Background processing completed');
+      } catch (processingError) {
+        console.error('[Process Upload API] Processing error:', processingError);
+        
+        // Update error status
+        try {
+          const currentStatus = await redis.get(uploadKey) || {};
+          await redis.set(uploadKey, {
+            ...currentStatus,
+            stage: 'error',
+            error: processingError.message,
+            lastUpdated: new Date().toISOString()
+          });
+        } catch (redisError) {
+          console.error(`[Process Upload API] Error updating Redis status:`, redisError);
+        }
+      }
+    } catch (error) {
+      console.error('[Process Upload API] Server error:', error);
+      
+      // If we haven't sent a response yet
+      if (!res.headersSent) {
+        return res.status(500).json({
+          success: false,
+          error: 'Server error',
+          message: error.message || 'An unexpected error occurred'
+        });
       }
     }
-    
-  } catch (error) {
-    console.error('Server error:', error);
-    // If we haven't sent a response yet
+  } else {
+    // Method not allowed
     if (!res.headersSent) {
-      return res.status(500).json({ 
-        success: false, 
-        error: 'Server error',
-        message: error.message || 'An unexpected error occurred'
+      return res.status(405).json({
+        success: false,
+        error: 'Method not allowed',
+        message: 'Only GET and POST methods are allowed'
       });
     }
   }

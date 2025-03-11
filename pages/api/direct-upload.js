@@ -4,7 +4,7 @@ import saveToSheet from '../../lib/cvParser';
 import sendConfirmationEmail from '../../lib/emailSender';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
-import { kv } from '@vercel/kv';
+import { redis } from '../../lib/redis';
 
 // Required for Next.js API routes
 export const config = {
@@ -15,7 +15,7 @@ export const config = {
   },
 };
 
-// We no longer need this in-memory storage since we're using Vercel KV
+// We no longer need this in-memory storage since we're using Redis
 // const PROCESSING_QUEUE = new Map();
 
 export default async function handler(req, res) {
@@ -48,9 +48,9 @@ export default async function handler(req, res) {
     console.log(`Checking status for upload ID: ${id}`);
     
     try {
-      // Query Vercel KV instead of in-memory map
+      // Query Redis instead of in-memory map
       const uploadKey = `upload:${id}`;
-      const status = await kv.get(uploadKey);
+      const status = await redis.get(uploadKey);
       
       if (!status) {
         console.log(`No status found for upload ID: ${id}`);
@@ -66,8 +66,8 @@ export default async function handler(req, res) {
         success: true,
         status
       });
-    } catch (kvError) {
-      console.error(`Error retrieving status from KV: ${kvError.message}`);
+    } catch (redisError) {
+      console.error(`Error retrieving status from Redis: ${redisError.message}`);
       return res.status(500).json({
         success: false,
         error: 'Storage error',
@@ -107,7 +107,7 @@ export default async function handler(req, res) {
     const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
     console.log(`Generated new upload ID: ${uploadId}`);
     
-    // Store the initial status in Vercel KV
+    // Store the initial status in Redis
     const uploadKey = `upload:${uploadId}`;
     const initialStatus = {
       stage: 'received',
@@ -119,13 +119,13 @@ export default async function handler(req, res) {
     };
     
     try {
-      // Store initial status in KV
-      await kv.set(uploadKey, initialStatus);
+      // Store initial status in Redis
+      await redis.set(uploadKey, initialStatus);
       // Set TTL to 1 hour (3600 seconds) to avoid storing forever
-      await kv.expire(uploadKey, 3600);
-      console.log(`Stored initial status in KV for ${uploadId}`);
-    } catch (kvError) {
-      console.error(`Error storing status in KV: ${kvError.message}`);
+      await redis.expire(uploadKey, 3600);
+      console.log(`Stored initial status in Redis for ${uploadId}`);
+    } catch (redisError) {
+      console.error(`Error storing status in Redis: ${redisError.message}`);
       // Continue anyway, as this is not critical for the upload
     }
     
@@ -149,17 +149,17 @@ export default async function handler(req, res) {
       // Start processing in the background without awaiting
       processUpload(uploadId, fileBuffer, fileInfo, fields).catch(async err => {
         console.error('[Background] Fatal error in background processing:', err);
-        // Update status to error in KV
+        // Update status to error in Redis
         try {
-          const currentStatus = await kv.get(uploadKey) || {};
-          await kv.set(uploadKey, {
+          const currentStatus = await redis.get(uploadKey) || {};
+          await redis.set(uploadKey, {
             ...currentStatus,
             stage: 'error',
             error: err.message,
             lastUpdated: new Date().toISOString()
           });
-        } catch (kvError) {
-          console.error(`Error updating error status in KV: ${kvError.message}`);
+        } catch (redisError) {
+          console.error(`Error updating error status in Redis: ${redisError.message}`);
         }
       });
       
@@ -195,7 +195,7 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
   
   try {
     // Update status to extracting_text
-    await updateKVStatus(uploadId, 'extracting_text', 10);
+    await updateRedisStatus(uploadId, 'extracting_text', 10);
     
     // Extract text from the file
     console.log(`[Process ${uploadId}] Extracting text from file...`);
@@ -203,7 +203,7 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
     console.log(`[Process ${uploadId}] Text extracted successfully, length:`, text.length);
     
     // Update status to uploading_to_cloud
-    await updateKVStatus(uploadId, 'uploading_to_cloud', 30);
+    await updateRedisStatus(uploadId, 'uploading_to_cloud', 30);
     
     // Upload to Google Cloud Storage with retries
     console.log(`[Process ${uploadId}] Starting GCS upload...`);
@@ -216,7 +216,7 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
     }
     
     // Update status to saving_to_sheets
-    await updateKVStatus(uploadId, 'saving_to_sheets', 60);
+    await updateRedisStatus(uploadId, 'saving_to_sheets', 60);
     
     // Prepare data for processing
     const parsedData = {
@@ -244,7 +244,7 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
     }
     
     // Update status to sending_email
-    await updateKVStatus(uploadId, 'sending_email', 80);
+    await updateRedisStatus(uploadId, 'sending_email', 80);
     
     // Send email with retries
     console.log(`[Process ${uploadId}] Sending confirmation email...`);
@@ -257,40 +257,40 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
     }
     
     // Update final status
-    await updateKVStatus(uploadId, 'completed', 100);
+    await updateRedisStatus(uploadId, 'completed', 100);
     console.log(`[Process ${uploadId}] Background processing completed successfully`);
   } catch (processingError) {
     console.error(`[Process ${uploadId}] Processing error:`, processingError);
     
-    // Update error status in KV
+    // Update error status in Redis
     try {
-      const currentStatus = await kv.get(uploadKey) || {};
-      await kv.set(uploadKey, {
+      const currentStatus = await redis.get(uploadKey) || {};
+      await redis.set(uploadKey, {
         ...currentStatus,
         stage: 'error',
         error: processingError.message,
         lastUpdated: new Date().toISOString()
       });
-    } catch (kvError) {
-      console.error(`[Process ${uploadId}] Error updating KV status:`, kvError);
+    } catch (redisError) {
+      console.error(`[Process ${uploadId}] Error updating Redis status:`, redisError);
     }
   }
 }
 
-// Helper to update status in Vercel KV
-async function updateKVStatus(uploadId, stage, progress) {
+// Helper to update status in Redis
+async function updateRedisStatus(uploadId, stage, progress) {
   const uploadKey = `upload:${uploadId}`;
   try {
-    const current = await kv.get(uploadKey) || {};
-    await kv.set(uploadKey, {
+    const current = await redis.get(uploadKey) || {};
+    await redis.set(uploadKey, {
       ...current,
       stage,
       progress,
       lastUpdated: new Date().toISOString()
     });
-    console.log(`[Status ${uploadId}] Updated KV to ${stage} (${progress}%)`);
-  } catch (kvError) {
-    console.error(`[Status ${uploadId}] Error updating KV status:`, kvError);
+    console.log(`[Status ${uploadId}] Updated Redis to ${stage} (${progress}%)`);
+  } catch (redisError) {
+    console.error(`[Status ${uploadId}] Error updating Redis status:`, redisError);
   }
 }
 
