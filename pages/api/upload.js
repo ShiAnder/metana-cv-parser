@@ -372,7 +372,8 @@ export default async function handler(req, res) {
         email: fields.email ? fields.email[0] : '',
         name: fields.name ? fields.name[0] : '',
         phone: fields.phone ? fields.phone[0] : '',
-        extractedText: text
+        extractedText: text,
+        content: text
       };
       
       await saveToSheet(sheetData);
