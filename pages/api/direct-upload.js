@@ -4,6 +4,7 @@ import saveToSheet from '../../lib/cvParser';
 import sendConfirmationEmail from '../../lib/emailSender';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
+import { kv } from '@vercel/kv';
 
 // Required for Next.js API routes
 export const config = {
@@ -14,9 +15,8 @@ export const config = {
   },
 };
 
-// Simple in-memory storage for uploaded files (for demo purposes)
-// Note: In production, you would use a proper database or queue system
-const PROCESSING_QUEUE = new Map();
+// We no longer need this in-memory storage since we're using Vercel KV
+// const PROCESSING_QUEUE = new Map();
 
 export default async function handler(req, res) {
   console.log('Direct upload API called with method:', req.method);
@@ -45,20 +45,35 @@ export default async function handler(req, res) {
       });
     }
     
-    const status = PROCESSING_QUEUE.get(id);
+    console.log(`Checking status for upload ID: ${id}`);
     
-    if (!status) {
-      return res.status(404).json({
+    try {
+      // Query Vercel KV instead of in-memory map
+      const uploadKey = `upload:${id}`;
+      const status = await kv.get(uploadKey);
+      
+      if (!status) {
+        console.log(`No status found for upload ID: ${id}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Not found',
+          message: 'No upload found with this ID'
+        });
+      }
+      
+      console.log(`Retrieved status for ${id}: ${JSON.stringify(status)}`);
+      return res.status(200).json({
+        success: true,
+        status
+      });
+    } catch (kvError) {
+      console.error(`Error retrieving status from KV: ${kvError.message}`);
+      return res.status(500).json({
         success: false,
-        error: 'Not found',
-        message: 'No upload found with this ID'
+        error: 'Storage error',
+        message: 'Error retrieving upload status'
       });
     }
-    
-    return res.status(200).json({
-      success: true,
-      status
-    });
   }
 
   // Only allow POST
@@ -90,16 +105,29 @@ export default async function handler(req, res) {
     
     // Generate a unique ID for this upload
     const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    console.log(`Generated new upload ID: ${uploadId}`);
     
-    // Store the initial status
-    PROCESSING_QUEUE.set(uploadId, {
+    // Store the initial status in Vercel KV
+    const uploadKey = `upload:${uploadId}`;
+    const initialStatus = {
       stage: 'received',
       progress: 0,
       fileInfo,
       fields,
       startTime: new Date().toISOString(),
       lastUpdated: new Date().toISOString(),
-    });
+    };
+    
+    try {
+      // Store initial status in KV
+      await kv.set(uploadKey, initialStatus);
+      // Set TTL to 1 hour (3600 seconds) to avoid storing forever
+      await kv.expire(uploadKey, 3600);
+      console.log(`Stored initial status in KV for ${uploadId}`);
+    } catch (kvError) {
+      console.error(`Error storing status in KV: ${kvError.message}`);
+      // Continue anyway, as this is not critical for the upload
+    }
     
     // Return a response immediately with the upload ID
     const responseData = {
@@ -119,15 +147,20 @@ export default async function handler(req, res) {
     // Note: This might not complete on Vercel due to function timeout
     try {
       // Start processing in the background without awaiting
-      processUpload(uploadId, fileBuffer, fileInfo, fields).catch(err => {
+      processUpload(uploadId, fileBuffer, fileInfo, fields).catch(async err => {
         console.error('[Background] Fatal error in background processing:', err);
-        // Update status to error
-        PROCESSING_QUEUE.set(uploadId, {
-          ...PROCESSING_QUEUE.get(uploadId),
-          stage: 'error',
-          error: err.message,
-          lastUpdated: new Date().toISOString()
-        });
+        // Update status to error in KV
+        try {
+          const currentStatus = await kv.get(uploadKey) || {};
+          await kv.set(uploadKey, {
+            ...currentStatus,
+            stage: 'error',
+            error: err.message,
+            lastUpdated: new Date().toISOString()
+          });
+        } catch (kvError) {
+          console.error(`Error updating error status in KV: ${kvError.message}`);
+        }
       });
       
       // After launching the background process, try creating a "processor" webhook to continue
@@ -136,10 +169,6 @@ export default async function handler(req, res) {
         // Call a webhook URL to take over processing
         // This would be an API route in your own application that handles the background processing
         console.log('[Webhook] Attempting to call processing webhook');
-        
-        // You would replace this with your own webhook URL
-        // For example: const webhookUrl = `${process.env.VERCEL_URL || 'http://localhost:3000'}/api/process-upload`;
-        // const response = await fetch(webhookUrl, { ... });
         
         // For now, just log that we would do this in a production system
         console.log('[Webhook] In a production system, we would call a webhook here to continue processing');
@@ -162,18 +191,19 @@ export default async function handler(req, res) {
 // Process an upload with retries and status updates
 async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
   console.log(`[Process ${uploadId}] Starting processing`);
+  const uploadKey = `upload:${uploadId}`;
   
   try {
-    // Update status
-    updateStatus(uploadId, 'extracting_text', 10);
+    // Update status to extracting_text
+    await updateKVStatus(uploadId, 'extracting_text', 10);
     
     // Extract text from the file
     console.log(`[Process ${uploadId}] Extracting text from file...`);
     const text = await extractText(fileBuffer, fileInfo.type);
     console.log(`[Process ${uploadId}] Text extracted successfully, length:`, text.length);
     
-    // Update status
-    updateStatus(uploadId, 'uploading_to_cloud', 30);
+    // Update status to uploading_to_cloud
+    await updateKVStatus(uploadId, 'uploading_to_cloud', 30);
     
     // Upload to Google Cloud Storage with retries
     console.log(`[Process ${uploadId}] Starting GCS upload...`);
@@ -185,8 +215,8 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
       console.error(`[Process ${uploadId}] GCS upload failed after retries:`, uploadError);
     }
     
-    // Update status
-    updateStatus(uploadId, 'saving_to_sheets', 60);
+    // Update status to saving_to_sheets
+    await updateKVStatus(uploadId, 'saving_to_sheets', 60);
     
     // Prepare data for processing
     const parsedData = {
@@ -213,8 +243,8 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
       throw sheetError; // Propagate this error
     }
     
-    // Update status
-    updateStatus(uploadId, 'sending_email', 80);
+    // Update status to sending_email
+    await updateKVStatus(uploadId, 'sending_email', 80);
     
     // Send email with retries
     console.log(`[Process ${uploadId}] Sending confirmation email...`);
@@ -227,31 +257,41 @@ async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
     }
     
     // Update final status
-    updateStatus(uploadId, 'completed', 100);
+    await updateKVStatus(uploadId, 'completed', 100);
     console.log(`[Process ${uploadId}] Background processing completed successfully`);
   } catch (processingError) {
     console.error(`[Process ${uploadId}] Processing error:`, processingError);
     
-    // Update error status
-    PROCESSING_QUEUE.set(uploadId, {
-      ...PROCESSING_QUEUE.get(uploadId),
-      stage: 'error',
-      error: processingError.message,
-      lastUpdated: new Date().toISOString()
-    });
+    // Update error status in KV
+    try {
+      const currentStatus = await kv.get(uploadKey) || {};
+      await kv.set(uploadKey, {
+        ...currentStatus,
+        stage: 'error',
+        error: processingError.message,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (kvError) {
+      console.error(`[Process ${uploadId}] Error updating KV status:`, kvError);
+    }
   }
 }
 
-// Helper to update status
-function updateStatus(uploadId, stage, progress) {
-  const current = PROCESSING_QUEUE.get(uploadId) || {};
-  PROCESSING_QUEUE.set(uploadId, {
-    ...current,
-    stage,
-    progress,
-    lastUpdated: new Date().toISOString()
-  });
-  console.log(`[Status ${uploadId}] Updated to ${stage} (${progress}%)`);
+// Helper to update status in Vercel KV
+async function updateKVStatus(uploadId, stage, progress) {
+  const uploadKey = `upload:${uploadId}`;
+  try {
+    const current = await kv.get(uploadKey) || {};
+    await kv.set(uploadKey, {
+      ...current,
+      stage,
+      progress,
+      lastUpdated: new Date().toISOString()
+    });
+    console.log(`[Status ${uploadId}] Updated KV to ${stage} (${progress}%)`);
+  } catch (kvError) {
+    console.error(`[Status ${uploadId}] Error updating KV status:`, kvError);
+  }
 }
 
 // Helper for retrying operations
@@ -426,7 +466,7 @@ async function uploadToGCS(buffer, filename, mimeType) {
         clientEmail = credentials.client_email;
         privateKey = credentials.private_key;
         
-        console.log(`Extracted from GCS_CREDENTIALS: project_id=${projectId ? 'present' : 'missing'}, client_email=${clientEmail ? 'present' : 'missing'}, private_key=${privateKey ? 'present' : 'missing'}`);
+        console.log(`Extracted from GCS_CREDENTIALS: project_id=${projectId ? 'present' : 'missing'}, client_email=${clientEmail ? 'present' : 'missing'}, private_key=${privateKey ? 'present(length:' + (privateKey?.length || 0) + ')' : 'missing'}`);
         
         // Get bucket name from separate env var
         bucketName = process.env.GCS_BUCKET_NAME || process.env.GOOGLE_STORAGE_BUCKET;
