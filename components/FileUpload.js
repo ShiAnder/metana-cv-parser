@@ -73,8 +73,12 @@ export default function FileUpload() {
       setError(null);
       setSuccess(false);
 
-      console.log('Sending request to /api/upload...');
-      const response = await fetch("/api/upload", {
+      // Use the new endpoint for Vercel deployments
+      const isVercel = window.location.hostname.includes('vercel.app');
+      const uploadUrl = isVercel ? "/api/cv-upload" : "/api/upload";
+      console.log(`Using upload endpoint: ${uploadUrl}`);
+
+      const response = await fetch(uploadUrl, {
         method: "POST",
         body: form,
         // Don't set Content-Type header - browser will set it with boundary for FormData
@@ -115,8 +119,26 @@ export default function FileUpload() {
     }
   };
 
+  const testApi = async () => {
+    try {
+      setError(null);
+      const response = await fetch('/api/test');
+      const data = await response.json();
+      setError(`API test successful: ${JSON.stringify(data)}`);
+    } catch (error) {
+      setError(`API test failed: ${error.message}`);
+    }
+  };
+
   return (
     <div className="max-w-md mx-auto bg-white p-6 rounded-xl shadow-md">
+      <button 
+        onClick={testApi}
+        className="mb-4 px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm"
+      >
+        Test API
+      </button>
+
       <form onSubmit={uploadFile} className="space-y-4">
         {success && (
           <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded relative" role="alert">
