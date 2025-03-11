@@ -39,7 +39,7 @@ export default async function handler(req, res) {
 
   try {
     console.log('Processing POST request in direct-upload');
-    console.log('Request headers:', req.headers);
+    console.log('Request headers:', JSON.stringify(req.headers));
     
     // Use busboy for multipart parsing - this is fast
     const { fileInfo, fileBuffer, fields } = await parseFormWithBusboy(req);
@@ -54,70 +54,85 @@ export default async function handler(req, res) {
     
     console.log('File parsed successfully:', fileInfo);
     
-    // IMPORTANT CHANGE: Return a success response immediately
-    // This prevents the Vercel function timeout
-    res.status(200).json({
+    // Return a fuller response with more details
+    const responseData = {
       success: true,
       message: 'File received, processing in background',
       fileInfo: fileInfo,
       fields: fields,
-      processing: 'async'
-    });
+      processing: 'async',
+      timestamp: new Date().toISOString()
+    };
     
-    // Process the file in the background *after* response is sent
-    // Note: This isn't ideal as Vercel may still terminate the function
-    // but it gives us a better chance of completing some of the work
-    try {
-      console.log('Starting background processing');
-      
-      // Extract text from the file
-      const text = await extractText(fileBuffer, fileInfo.type);
-      console.log('Text extracted successfully, length:', text.length);
-      
-      // Upload to Google Cloud Storage
-      let cvUrl = null;
+    // Send the response
+    res.status(200).json(responseData);
+    
+    // IMPORTANT: Execute the processing in a way that doesn't block the response
+    // but still completes even if Vercel tries to terminate the function
+    
+    // Create an async function for background processing
+    const backgroundProcess = async () => {
       try {
-        cvUrl = await uploadToGCS(fileBuffer, fileInfo.name, fileInfo.type);
-        console.log('File uploaded to GCS:', cvUrl);
-      } catch (uploadError) {
-        console.warn('GCS upload failed:', uploadError);
+        console.log('[Background] Starting background processing');
+        
+        // Extract text from the file
+        console.log('[Background] Extracting text from file...');
+        const text = await extractText(fileBuffer, fileInfo.type);
+        console.log('[Background] Text extracted successfully, length:', text.length);
+        
+        // Upload to Google Cloud Storage
+        console.log('[Background] Starting GCS upload...');
+        let cvUrl = null;
+        try {
+          cvUrl = await uploadToGCS(fileBuffer, fileInfo.name, fileInfo.type);
+          console.log('[Background] File uploaded to GCS:', cvUrl);
+        } catch (uploadError) {
+          console.error('[Background] GCS upload failed:', uploadError);
+        }
+        
+        // Prepare data for processing
+        const parsedData = {
+          content: text,
+          extractedText: text,
+          cvUrl: cvUrl || 'N/A',
+          name: fields.name,
+          email: fields.email,
+          phone: fields.phone,
+          filename: fileInfo.name,
+          mimeType: fileInfo.type,
+          size: fileInfo.size,
+          uploadDate: new Date().toISOString()
+        };
+        
+        // Save to Google Sheets
+        console.log('[Background] Saving to Google Sheets...');
+        console.log('[Background] ParsedData:', JSON.stringify(parsedData));
+        try {
+          await saveToSheet(parsedData);
+          console.log('[Background] Data saved to sheet successfully');
+        } catch (sheetError) {
+          console.error('[Background] Sheet error:', sheetError);
+        }
+        
+        // Send email
+        console.log('[Background] Sending confirmation email...');
+        try {
+          await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
+          console.log('[Background] Email sent successfully');
+        } catch (emailError) {
+          console.error('[Background] Email error:', emailError);
+        }
+        
+        console.log('[Background] Background processing completed successfully');
+      } catch (processingError) {
+        console.error('[Background] Processing error:', processingError);
       }
-      
-      // Prepare data for processing
-      const parsedData = {
-        content: text,
-        extractedText: text,
-        cvUrl: cvUrl || 'N/A',
-        name: fields.name,
-        email: fields.email,
-        phone: fields.phone,
-        filename: fileInfo.name,
-        mimeType: fileInfo.type,
-        size: fileInfo.size,
-        uploadDate: new Date().toISOString()
-      };
-      
-      // Save to Google Sheets
-      try {
-        await saveToSheet(parsedData);
-        console.log('Data saved to sheet');
-      } catch (sheetError) {
-        console.error('Sheet error:', sheetError);
-      }
-      
-      // Send email
-      try {
-        await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
-        console.log('Email sent');
-      } catch (emailError) {
-        console.error('Email error:', emailError);
-      }
-      
-      console.log('Background processing completed successfully');
-    } catch (processingError) {
-      // Log errors but don't affect the response
-      console.error('Background processing error:', processingError);
-    }
+    };
+    
+    // Execute the background processing
+    backgroundProcess().catch(err => {
+      console.error('[Background] Fatal error in background processing:', err);
+    });
     
   } catch (error) {
     console.error('Server error:', error);
@@ -192,6 +207,8 @@ function parseFormWithBusboy(req) {
 
 // Extract text based on mimetype
 async function extractText(buffer, mimeType) {
+  console.log(`Starting text extraction for file type: ${mimeType}`);
+  
   if (mimeType === 'application/pdf') {
     const data = await pdfParse(buffer);
     return data.text;
@@ -217,20 +234,52 @@ async function uploadToGCS(buffer, filename, mimeType) {
     // Try to get credentials from either individual env vars or JSON string
     let projectId, bucketName, privateKey, clientEmail;
     
+    // Debug: Log all environment variables that might contain credentials (without values)
+    const credentialEnvVars = [
+      'GCS_CREDENTIALS', 'GCS_BUCKET_NAME', 'GOOGLE_STORAGE_BUCKET',
+      'GOOGLE_PROJECT_ID', 'GCP_PROJECT_ID',
+      'GOOGLE_PRIVATE_KEY', 'GCP_PRIVATE_KEY',
+      'GOOGLE_SERVICE_ACCOUNT_EMAIL', 'GCP_CLIENT_EMAIL'
+    ];
+    
+    console.log('Checking for credential env vars:', 
+      credentialEnvVars.map(key => `${key}=${process.env[key] ? 'present' : 'missing'}`).join(', '));
+    
     // Check if we have a JSON credentials object
     if (process.env.GCS_CREDENTIALS) {
       try {
-        console.log('Found GCS_CREDENTIALS environment variable, parsing JSON...');
-        const credentials = typeof process.env.GCS_CREDENTIALS === 'string' 
-          ? JSON.parse(process.env.GCS_CREDENTIALS) 
-          : process.env.GCS_CREDENTIALS;
+        console.log('Found GCS_CREDENTIALS environment variable');
+        let credentials;
+        
+        // Check if credentials are already an object or need to be parsed
+        if (typeof process.env.GCS_CREDENTIALS === 'string') {
+          try {
+            console.log('Parsing GCS_CREDENTIALS as JSON string');
+            credentials = JSON.parse(process.env.GCS_CREDENTIALS);
+          } catch (jsonError) {
+            console.error('Error parsing GCS_CREDENTIALS as JSON:', jsonError.message);
+            console.log('Checking if credentials are base64 encoded');
+            
+            // Try decoding as base64
+            try {
+              const decoded = Buffer.from(process.env.GCS_CREDENTIALS, 'base64').toString();
+              credentials = JSON.parse(decoded);
+              console.log('Successfully decoded base64 credentials');
+            } catch (base64Error) {
+              console.error('Failed to decode base64 credentials:', base64Error.message);
+              throw new Error('Invalid GCS credentials format');
+            }
+          }
+        } else {
+          credentials = process.env.GCS_CREDENTIALS;
+        }
         
         // Extract values from the credentials object
         projectId = credentials.project_id;
         clientEmail = credentials.client_email;
         privateKey = credentials.private_key;
         
-        console.log(`Extracted from GCS_CREDENTIALS: project_id=${projectId}, client_email=${clientEmail ? 'present' : 'missing'}`);
+        console.log(`Extracted from GCS_CREDENTIALS: project_id=${projectId ? 'present' : 'missing'}, client_email=${clientEmail ? 'present' : 'missing'}, private_key=${privateKey ? 'present' : 'missing'}`);
         
         // Get bucket name from separate env var
         bucketName = process.env.GCS_BUCKET_NAME || process.env.GOOGLE_STORAGE_BUCKET;
@@ -245,7 +294,7 @@ async function uploadToGCS(buffer, filename, mimeType) {
     privateKey = privateKey || process.env.GOOGLE_PRIVATE_KEY || process.env.GCP_PRIVATE_KEY;
     clientEmail = clientEmail || process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GCP_CLIENT_EMAIL;
     
-    console.log(`Final credentials: projectId=${projectId ? 'present' : 'missing'}, bucketName=${bucketName ? 'present' : 'missing'}`);
+    console.log(`Final credentials: projectId=${projectId ? 'present' : 'missing'}, bucketName=${bucketName ? 'present' : 'missing'}, privateKey=${privateKey ? 'present' : 'missing'}, clientEmail=${clientEmail ? 'present' : 'missing'}`);
     
     if (!projectId || !bucketName) {
       console.warn('Missing GCS environment variables - saving file locally instead');
@@ -318,9 +367,6 @@ async function uploadToGCS(buffer, filename, mimeType) {
     });
     
     console.log('File uploaded to Google Cloud Storage successfully');
-    
-    // Don't try to make the file public if uniform bucket-level access is enabled
-    // Instead, rely on bucket-level permissions
     
     // Get the public URL (bucket should have allUsers read access at bucket level)
     const publicUrl = `https://storage.googleapis.com/${bucketName}/${uniqueFilename}`;

@@ -1,248 +1,281 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from 'react';
 
 export default function FileUpload() {
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    phone: '',
-  });
   const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState(null);
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
-    setError(null);
-    setSuccess(false);
-  };
+  const [error, setError] = useState(null);
+  const [formData, setFormData] = useState(null);
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
-    if (selectedFile) {
-      if (selectedFile.size > 10 * 1024 * 1024) {
-        setError("File size must be less than 10MB");
-        setFile(null);
-        return;
-      }
-      const allowedTypes = [
-        'application/pdf', 
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      ];
-      if (!allowedTypes.includes(selectedFile.type)) {
-        setError(`Unsupported file type: ${selectedFile.type}. Please upload only PDF or DOCX files`);
-        setFile(null);
-        return;
-      }
-      console.log('Selected file type:', selectedFile.type);
-    }
     setFile(selectedFile);
-    setError(null);
-    setSuccess(false);
+    console.log('Selected file type:', selectedFile?.type);
   };
 
   const uploadFile = async (e) => {
-    e.preventDefault(); // Prevent the default form submission behavior
-
-    if (!file) {
-      setError("Please select a file!");
-      return;
-    }
-
-    console.log('Uploading file:', {
-      name: file.name,
-      type: file.type,
-      size: file.size,
-    });
-
-    const form = new FormData();
-    form.append("file", file, file.name);
-    form.append("filename", file.name);
-    Object.entries(formData).forEach(([key, value]) => {
-      form.append(key, value);
-    });
-
-    // Log every field in the FormData
-    console.log('FormData contents:');
-    for (const pair of form.entries()) {
-      if (pair[0] === 'file') {
-        console.log(pair[0], ':', pair[1].name, pair[1].type, pair[1].size);
-      } else {
-        console.log(pair[0], ':', pair[1]);
-      }
-    }
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setSuccess(false);
 
     try {
-      setUploading(true);
-      setError(null);
-      setSuccess(false);
-
-      // Determine if we're in the Vercel environment
-      const isVercel = window.location.hostname.includes('vercel.app');
-      
-      // Use only the direct upload endpoint since it's working properly
-      const uploadEndpoint = isVercel ? "/api/direct-upload" : "/api/upload";
-      
-      console.log(`Using upload endpoint: ${uploadEndpoint}`);
-      
-      // Log the form data being sent
-      console.log('FormData contents:');
-      for (const pair of form.entries()) {
-        if (pair[0] === 'file') {
-          console.log(pair[0], ':', pair[1].name, pair[1].type, pair[1].size);
-        } else {
-          console.log(pair[0], ':', pair[1]);
-        }
+      if (!file) {
+        throw new Error('Please select a file');
       }
 
-      console.log(`Sending request to endpoint: ${uploadEndpoint}`);
-      
-      const response = await fetch(uploadEndpoint, {
-        method: "POST",
-        body: form,
+      console.log('Uploading file:', {
+        name: file.name,
+        type: file.type,
+        size: file.size
       });
-      
+
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('filename', file.name);
+      formData.append('name', name);
+      formData.append('email', email);
+      formData.append('phone', phone);
+
+      // Log FormData contents for debugging
+      console.log('FormData contents:');
+      for (let [key, value] of formData.entries()) {
+        console.log(key, ':', typeof value === 'object' ? `${value.name} ${value.type} ${value.size}` : value);
+      }
+
+      // Determine which endpoint to use
+      const uploadEndpoint = '/api/direct-upload';
+      console.log('Using upload endpoint:', uploadEndpoint);
+
+      // Log the form data again just before sending
+      console.log('FormData contents:');
+      for (let [key, value] of formData.entries()) {
+        console.log(key, ':', typeof value === 'object' ? `${value.name} ${value.type} ${value.size}` : value);
+      }
+
+      console.log('Sending request to endpoint:', uploadEndpoint);
+      const response = await fetch(uploadEndpoint, {
+        method: 'POST',
+        body: formData,
+      });
+
       console.log('Response received:', {
         status: response.status,
         statusText: response.statusText,
+        headers: Object.fromEntries([...response.headers.entries()])
       });
+
+      // Try to get response text first to see if it's even valid
+      const responseText = await response.text();
+      console.log('Response text length:', responseText.length);
       
-      // Handle non-JSON responses
-      const contentType = response.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        const text = await response.text();
-        console.error('Non-JSON response:', text);
-        throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}...`);
+      let data;
+      // Try to parse as JSON if there's content
+      if (responseText && responseText.trim()) {
+        try {
+          data = JSON.parse(responseText);
+          console.log('Response data:', data);
+        } catch (parseError) {
+          console.error('Error parsing JSON response:', parseError);
+          console.log('Raw response text:', responseText);
+          throw new Error('Invalid response from server. Not valid JSON.');
+        }
+      } else {
+        console.warn('Response was empty');
+        // Create our own data object since the response was empty
+        data = { 
+          success: response.ok, 
+          message: response.ok ? 'Request processed' : 'Server error' 
+        };
       }
-      
-      // Parse JSON response
-      const data = await response.json();
-      console.log('Response data:', data);
-      
-      if (!response.ok || !data?.success) {
-        throw new Error(data?.message || data?.error || `Upload failed with status ${response.status}`);
+
+      if (response.ok && (data.success !== false)) {
+        setSuccess(true);
+        setFormData({
+          name,
+          email,
+          phone,
+          filename: file.name
+        });
+        
+        // Reset the form on success
+        setFile(null);
+        setName('');
+        setEmail('');
+        setPhone('');
+        document.getElementById('upload-form').reset();
+      } else {
+        const errorMessage = data.message || data.error || 'Error uploading file';
+        throw new Error(errorMessage);
       }
-      
-      setSuccess(true);
-      setFile(null);
-      setFormData({ name: '', email: '', phone: '' });
-    } catch (error) {
-      console.error('Upload error:', error);
-      setError(error.message || "Upload failed. Please try again.");
+    } catch (err) {
+      console.error('Error:', err);
+      setError(err.message);
+      setSuccess(false);
     } finally {
-      setUploading(false);
+      setLoading(false);
     }
   };
 
+  // Test API connection
+  const testApi = async () => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      console.log('Testing API connection...');
+      const response = await fetch('/api/health', {
+        method: 'GET',
+      });
+      
+      console.log('Test response status:', response.status);
+      
+      const responseText = await response.text();
+      console.log('Test response text:', responseText);
+      
+      let data;
+      if (responseText && responseText.trim()) {
+        try {
+          data = JSON.parse(responseText);
+        } catch (e) {
+          console.error('Error parsing test response:', e);
+          data = { success: false, message: 'Invalid JSON response' };
+        }
+      } else {
+        data = { success: response.ok, message: response.ok ? 'API is working' : 'Empty response' };
+      }
+      
+      if (response.ok && data.success !== false) {
+        setError('API test successful: ' + (data.message || 'Connected'));
+      } else {
+        setError('API test failed: ' + (data.message || response.statusText || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('API test error:', err);
+      setError('API connection error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = (e) => {
+    uploadFile(e);
+  };
+
   return (
-    <div className="max-w-md mx-auto bg-white p-6 rounded-xl shadow-md">
-      <form onSubmit={uploadFile} className="space-y-4">
-        {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded relative" role="alert">
-            <strong className="font-bold">Success!</strong>
-            <span className="block sm:inline"> Your CV has been uploaded successfully.</span>
-          </div>
-        )}
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative" role="alert">
-            <strong className="font-bold">Error!</strong>
-            <span className="block sm:inline"> {error}</span>
-          </div>
-        )}
-
-        {/* Name Field */}
-        <div>
-          <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-            Name
-          </label>
-          <input
-            type="text"
-            id="name"
-            name="name"
-            value={formData.name}
-            onChange={handleInputChange}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 text-gray-900 placeholder-gray-500"
-            placeholder="Enter your name"
-          />
-        </div>
-
-        {/* Email Field */}
-        <div>
-          <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-            Email
-          </label>
-          <input
-            type="email"
-            id="email"
-            name="email"
-            value={formData.email}
-            onChange={handleInputChange}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 text-gray-900 placeholder-gray-500"
-            placeholder="Enter your email"
-          />
-        </div>
-
-        {/* Phone Field */}
-        <div>
-          <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
-            Phone
-          </label>
-          <input
-            type="tel"
-            id="phone"
-            name="phone"
-            value={formData.phone}
-            onChange={handleInputChange}
-            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 text-gray-900 placeholder-gray-500"
-            placeholder="Enter your phone number"
-          />
-        </div>
-
-        {/* File Upload */}
-        <div>
-          <label htmlFor="file" className="block text-sm font-medium text-gray-700">
-            Upload CV (Required)
-          </label>
-          <div className="mt-1 flex items-center">
-            <label
-              htmlFor="file"
-              className="cursor-pointer px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-            >
-              Select File
-            </label>
-            <input
-              id="file"
-              type="file"
-              name="file"
-              accept=".pdf,.docx"
-              onChange={handleFileChange}
-              className="sr-only"
-            />
-            <span className="ml-3 text-sm text-gray-500">
-              Only PDF and DOCX files are supported
-            </span>
-          </div>
-          {file && (
-            <p className="mt-2 text-sm text-gray-500">Selected file: {file.name}</p>
+    <div className="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden md:max-w-2xl p-8 mt-10">
+      <h2 className="text-xl font-bold text-gray-900 mb-6">Upload your CV</h2>
+      
+      {success ? (
+        <div className="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mb-4" role="alert">
+          <p className="font-bold">Success!</p>
+          <p>Your CV has been uploaded successfully.</p>
+          {formData && (
+            <div className="mt-2 text-sm">
+              <p>Name: {formData.name}</p>
+              <p>Email: {formData.email}</p>
+              <p>Phone: {formData.phone}</p>
+              <p>File: {formData.filename}</p>
+            </div>
           )}
         </div>
-
-        <button
-          type="submit"
-          disabled={uploading}
-          className="w-full inline-flex justify-center items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-        >
-          {uploading ? 'Uploading...' : 'Upload CV'}
-        </button>
-      </form>
+      ) : (
+        <form id="upload-form" onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="name" className="block text-sm font-medium text-gray-700">
+              Full Name
+            </label>
+            <input
+              type="text"
+              id="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              required
+            />
+          </div>
+          
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+              Email Address
+            </label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              required
+            />
+          </div>
+          
+          <div>
+            <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
+              Phone Number
+            </label>
+            <input
+              type="tel"
+              id="phone"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              required
+            />
+          </div>
+          
+          <div>
+            <label htmlFor="file" className="block text-sm font-medium text-gray-700">
+              Upload CV (PDF, DOCX, TXT)
+            </label>
+            <input
+              type="file"
+              id="file"
+              onChange={handleFileChange}
+              className="mt-1 block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-md file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100"
+              accept=".pdf,.docx,.txt"
+              required
+            />
+          </div>
+          
+          {error && (
+            <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4" role="alert">
+              <p className="font-bold">Error</p>
+              <p>{error}</p>
+            </div>
+          )}
+          
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={loading}
+              className={`inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
+                loading ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+            >
+              {loading ? 'Uploading...' : 'Upload CV'}
+            </button>
+            
+            <button
+              type="button"
+              onClick={testApi}
+              className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              Test API
+            </button>
+          </div>
+        </form>
+      )}
     </div>
-
   );
 }
