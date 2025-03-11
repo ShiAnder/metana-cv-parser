@@ -131,117 +131,165 @@ async function uploadToGCS(filePath, originalFilename) {
 export default async function handler(req, res) {
   // Only allow POST requests
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed', details: 'Only POST requests are allowed' });
+    return res.status(405).json({ 
+      success: false,
+      error: 'Method not allowed', 
+      message: 'Only POST requests are allowed' 
+    });
   }
+  
+  let tempFilePath;
+  let newFilePath;
 
-  const form = new IncomingForm({
-    keepExtensions: true,
-    uploadDir: tempDir,
-    multiples: false,
-  });
+  try {
+    const form = new IncomingForm({
+      keepExtensions: true,
+      uploadDir: tempDir,
+      multiples: false,
+    });
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      console.error('Error in form parsing:', err);
-      return res.status(400).json({ error: 'File upload failed', details: err.message });
-    }
-
-    try {
-      const uploadedFile = files.file ? (Array.isArray(files.file) ? files.file[0] : files.file) : null;
-      if (!uploadedFile) {
-        return res.status(400).json({ error: 'No file uploaded or incorrect field name' });
-      }
-
-      const mimeType = uploadedFile.mimetype;
-      console.log('Uploaded file type:', mimeType, 'File name:', uploadedFile.originalFilename);
-      const originalFilename = uploadedFile.originalFilename;
-      const tempFilePath = uploadedFile.filepath;
-      const newFilePath = path.join(tempDir, originalFilename);
-
-      // Rename file to keep original filename
-      fs.renameSync(tempFilePath, newFilePath);
-
-      // Check if file type is supported
-      const supportedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
-      if (!supportedTypes.includes(mimeType)) {
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        return res.status(400).json({ 
-          error: 'Unsupported file format', 
-          details: `File type ${mimeType} is not supported. Please upload a PDF or DOCX file.` 
-        });
-      }
-
-      // Extract text from the renamed file
-      let text;
-      try {
-        text = await extractText(newFilePath, mimeType);
-      } catch (error) {
-        console.error('Text extraction error:', error);
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        return res.status(400).json({ 
-          error: 'Text extraction failed', 
-          details: `Could not extract text from the file. Please ensure it's a valid ${mimeType === 'application/pdf' ? 'PDF' : 'DOCX'} file.`
-        });
-      }
-
-      if (!text) {
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        throw new Error('Failed to extract text from file');
-      }
-
-      // Upload to Google Cloud Storage
-      const cvUrl = await uploadToGCS(newFilePath, originalFilename);
-      const isLocalFile = cvUrl.startsWith('local://');
-      
-      if (isLocalFile) {
-        console.log('Using local file as fallback instead of GCS. Process will continue but CV download may not work.');
-      }
-
-      // Prepare data to save
-      const parsedData = {
-        content: text,
-        cvUrl,
-        name: fields.name,
-        email: fields.email,
-        phone: fields.phone,
-        filename: originalFilename, // Include the filename in the data
-        isLocalFile // Flag to indicate if this is a local file
-      };
-
-      // Save extracted data to Google Sheets
-      try {
-        await saveToSheet(parsedData);
-        console.log("Data successfully saved to Google Sheets");
-      } catch (sheetError) {
-        console.error("Error saving to Google Sheets:", sheetError);
-        // Continue with the response even if sheet saving fails
-      }
-
-      console.log("This is the parsed data in upload.js:", parsedData);
-
-      // Send confirmation email
-      try {
-        await sendConfirmationEmail(fields.name, fields.email, originalFilename);
-        console.log("Confirmation email sent successfully");
-      } catch (emailError) {
-        console.error("Error sending confirmation email:", emailError);
-        // Continue with the response even if email sending fails
-      }
-
-      // Return success response
-      return res.status(200).json({ 
-        success: true,
-        message: 'CV processed successfully' 
+    // Parse the form using Promise to handle errors better
+    const [fields, files] = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve([fields, files]);
       });
-    } catch (error) {
-      console.error('Error processing request:', error);
-      return res.status(500).json({ error: 'Internal server error', details: error.message });
+    });
+
+    const uploadedFile = files.file ? (Array.isArray(files.file) ? files.file[0] : files.file) : null;
+    if (!uploadedFile) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'No file uploaded or incorrect field name' 
+      });
     }
-  });
+
+    const mimeType = uploadedFile.mimetype;
+    console.log('Uploaded file type:', mimeType, 'File name:', uploadedFile.originalFilename);
+    const originalFilename = uploadedFile.originalFilename;
+    tempFilePath = uploadedFile.filepath;
+    newFilePath = path.join(tempDir, originalFilename);
+
+    // Rename file to keep original filename
+    fs.renameSync(tempFilePath, newFilePath);
+
+    // Check if file type is supported
+    const supportedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
+    if (!supportedTypes.includes(mimeType)) {
+      try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
+      
+      return res.status(400).json({ 
+        success: false,
+        error: 'Unsupported file format', 
+        message: `File type ${mimeType} is not supported. Please upload a PDF or DOCX file.` 
+      });
+    }
+
+    // Extract text from the renamed file
+    let text;
+    try {
+      text = await extractText(newFilePath, mimeType);
+    } catch (error) {
+      console.error('Text extraction error:', error);
+      // Clean up the file
+      try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
+      
+      return res.status(400).json({ 
+        success: false,
+        error: 'Text extraction failed', 
+        message: `Could not extract text from the file. Please ensure it's a valid ${mimeType === 'application/pdf' ? 'PDF' : 'DOCX'} file.`
+      });
+    }
+
+    if (!text) {
+      // Clean up the file
+      try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
+      
+      return res.status(400).json({
+        success: false,
+        error: 'Empty content',
+        message: 'Failed to extract text from file'
+      });
+    }
+
+    // Upload to Google Cloud Storage
+    const cvUrl = await uploadToGCS(newFilePath, originalFilename);
+    const isLocalFile = cvUrl.startsWith('local://');
+    
+    if (isLocalFile) {
+      console.log('Using local file as fallback instead of GCS. Process will continue but CV download may not work.');
+    }
+
+    // Prepare data to save
+    const parsedData = {
+      content: text,
+      cvUrl,
+      name: fields.name,
+      email: fields.email,
+      phone: fields.phone,
+      filename: originalFilename, // Include the filename in the data
+      isLocalFile // Flag to indicate if this is a local file
+    };
+
+    // Save extracted data to Google Sheets
+    try {
+      await saveToSheet(parsedData);
+      console.log("Data successfully saved to Google Sheets");
+    } catch (sheetError) {
+      console.error("Error saving to Google Sheets:", sheetError);
+      // Continue with the response even if sheet saving fails
+    }
+
+    console.log("This is the parsed data in upload.js:", parsedData);
+
+    // Send confirmation email
+    try {
+      await sendConfirmationEmail(fields.name, fields.email, originalFilename);
+      console.log("Confirmation email sent successfully");
+    } catch (emailError) {
+      console.error("Error sending confirmation email:", emailError);
+      // Continue with the response even if email sending fails
+    }
+
+    // Return success response with proper JSON structure
+    return res.status(200).json({ 
+      success: true,
+      message: 'CV processed successfully',
+      data: {
+        filename: originalFilename,
+        email: fields.email
+      }
+    });
+  } catch (error) {
+    console.error('Error processing request:', error);
+    // Ensure we return a properly formatted JSON response
+    return res.status(500).json({ 
+      success: false,
+      error: 'Internal server error', 
+      message: error.message || 'An unexpected error occurred'
+    });
+  } finally {
+    // Clean up the temporary file regardless of success or failure
+    if (newFilePath && fs.existsSync(newFilePath)) {
+      try {
+        fs.unlinkSync(newFilePath);
+        console.log(`Cleaned up temporary file: ${newFilePath}`);
+      } catch (cleanupError) {
+        console.error('Error cleaning up temporary file:', cleanupError);
+      }
+    }
+    
+    // Clean up the original temp file created by formidable if it still exists
+    if (tempFilePath && fs.existsSync(tempFilePath) && tempFilePath !== newFilePath) {
+      try {
+        fs.unlinkSync(tempFilePath);
+        console.log(`Cleaned up original temporary file: ${tempFilePath}`);
+      } catch (cleanupError) {
+        console.error('Error cleaning up original temporary file:', cleanupError);
+      }
+    }
+  }
 }
