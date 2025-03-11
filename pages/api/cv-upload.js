@@ -212,26 +212,53 @@ async function extractText(buffer, mimeType) {
 // Upload to Google Cloud Storage
 async function uploadToGCS(buffer, filename, mimeType) {
   // Initialize storage with credentials from environment variable
-  const storageConfig = JSON.parse(process.env.GCS_CREDENTIALS);
-  const storage = new Storage({
-    projectId: storageConfig.project_id,
-    credentials: {
-      client_email: storageConfig.client_email,
-      private_key: storageConfig.private_key,
-    },
-  });
+  try {
+    console.log('Uploading to Google Cloud Storage...');
+    
+    // Initialize storage with credentials from environment variable
+    let storageConfig;
+    try {
+      const credentials = process.env.GCS_CREDENTIALS;
+      if (!credentials) {
+        throw new Error('GCS_CREDENTIALS environment variable is missing');
+      }
+      
+      // Handle already parsed JSON object (happens in some environments)
+      if (typeof credentials === 'object') {
+        storageConfig = credentials;
+      } else {
+        // Safely parse JSON string
+        storageConfig = JSON.parse(credentials);
+      }
+    } catch (parseError) {
+      console.error('Error parsing GCS credentials:', parseError);
+      throw new Error(`Failed to parse GCS credentials: ${parseError.message}`);
+    }
 
-  const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
-  const sanitizedFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
-  const file = bucket.file(sanitizedFilename);
+    const storage = new Storage({
+      projectId: storageConfig.project_id,
+      credentials: {
+        client_email: storageConfig.client_email,
+        private_key: storageConfig.private_key,
+      },
+    });
 
-  // Upload buffer
-  await file.save(buffer, {
-    metadata: {
-      contentType: mimeType,
-      cacheControl: 'public, max-age=31536000',
-    },
-  });
+    const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
+    const sanitizedFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
+    const file = bucket.file(sanitizedFilename);
 
-  return `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`;
+    // Upload buffer
+    await file.save(buffer, {
+      metadata: {
+        contentType: mimeType,
+        cacheControl: 'public, max-age=31536000',
+      },
+    });
+
+    console.log(`File uploaded to GCS: ${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`);
+    return `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`;
+  } catch (error) {
+    console.error('Error in GCS upload:', error);
+    throw error;
+  }
 } 

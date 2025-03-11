@@ -53,7 +53,25 @@ async function uploadToGCS(buffer, filename, mimeType) {
     console.log('Uploading to Google Cloud Storage...');
     
     // Initialize storage with credentials from environment variable
-    const storageConfig = JSON.parse(process.env.GCS_CREDENTIALS);
+    let storageConfig;
+    try {
+      const credentials = process.env.GCS_CREDENTIALS;
+      if (!credentials) {
+        throw new Error('GCS_CREDENTIALS environment variable is missing');
+      }
+      
+      // Handle already parsed JSON object (happens in some environments)
+      if (typeof credentials === 'object') {
+        storageConfig = credentials;
+      } else {
+        // Safely parse JSON string
+        storageConfig = JSON.parse(credentials);
+      }
+    } catch (parseError) {
+      console.error('Error parsing GCS credentials:', parseError);
+      throw new Error(`Failed to parse GCS credentials: ${parseError.message}`);
+    }
+    
     const storage = new Storage({
       projectId: storageConfig.project_id,
       credentials: {

@@ -86,114 +86,62 @@ export default function FileUpload() {
       // Determine if we're in the Vercel environment
       const isVercel = window.location.hostname.includes('vercel.app');
       
-      // Try multiple endpoints in sequence if on Vercel
-      const endpoints = isVercel 
-        ? ["/api/upload-only", "/api/direct-upload", "/api/simple-upload", "/api/cv-upload", "/api/upload"] 
-        : ["/api/upload"];
+      // Use only the direct upload endpoint since it's working properly
+      const uploadEndpoint = isVercel ? "/api/direct-upload" : "/api/upload";
       
-      console.log(`Will try these endpoints in order:`, endpoints);
+      console.log(`Using upload endpoint: ${uploadEndpoint}`);
       
-      let lastError = null;
-      let success = false;
-      
-      // Try each endpoint until one works
-      for (const endpoint of endpoints) {
-        if (success) break;
-        
-        try {
-          console.log(`Trying endpoint: ${endpoint}`);
-          
-          const response = await fetch(endpoint, {
-            method: "POST",
-            body: form,
-          });
-          
-          console.log(`Response from ${endpoint}:`, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: Object.fromEntries([...response.headers.entries()]),
-          });
-          
-          // Handle non-JSON responses
-          const contentType = response.headers.get("content-type");
-          if (!contentType || !contentType.includes("application/json")) {
-            const text = await response.text();
-            console.warn(`Non-JSON response from ${endpoint}:`, text.substring(0, 100));
-            throw new Error(`Server returned non-JSON response`);
-          }
-          
-          // Parse JSON response
-          const data = await response.json();
-          console.log(`JSON data from ${endpoint}:`, data);
-          
-          if (response.ok && data?.success) {
-            console.log(`Successful upload using ${endpoint}`);
-            
-            // Log details about the response for debugging
-            if (endpoint === '/api/simple-upload' && data.fileInfo) {
-              console.log('Simple upload details:', {
-                receivedBytes: data.fileInfo.receivedBytes,
-                originalFileSize: file.size,
-                ratio: data.fileInfo.receivedBytes / file.size,
-                contentType: data.fileInfo.contentType
-              });
-              
-              // Consider the upload successful even if simple-upload doesn't process the file
-              // since we're just trying to confirm data transmission works
-              success = true;
-              setSuccess(true);
-              setError(`Your file was received (${data.fileInfo.receivedBytes} bytes). ` +
-                "This is a test endpoint that confirms data transmission works.");
-              break;
-            } else {
-              // Normal success case
-              success = true;
-              setSuccess(true);
-              setFile(null);
-              setFormData({ name: '', email: '', phone: '' });
-              break;
-            }
-          } else {
-            throw new Error(data?.message || data?.error || `Upload failed with status ${response.status}`);
-          }
-        } catch (endpointError) {
-          console.warn(`Error with endpoint ${endpoint}:`, endpointError);
-          lastError = endpointError;
-          // Continue to next endpoint
+      // Log the form data being sent
+      console.log('FormData contents:');
+      for (const pair of form.entries()) {
+        if (pair[0] === 'file') {
+          console.log(pair[0], ':', pair[1].name, pair[1].type, pair[1].size);
+        } else {
+          console.log(pair[0], ':', pair[1]);
         }
       }
+
+      console.log(`Sending request to endpoint: ${uploadEndpoint}`);
       
-      if (!success && lastError) {
-        throw lastError;
+      const response = await fetch(uploadEndpoint, {
+        method: "POST",
+        body: form,
+      });
+      
+      console.log('Response received:', {
+        status: response.status,
+        statusText: response.statusText,
+      });
+      
+      // Handle non-JSON responses
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        const text = await response.text();
+        console.error('Non-JSON response:', text);
+        throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}...`);
       }
+      
+      // Parse JSON response
+      const data = await response.json();
+      console.log('Response data:', data);
+      
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || data?.error || `Upload failed with status ${response.status}`);
+      }
+      
+      setSuccess(true);
+      setFile(null);
+      setFormData({ name: '', email: '', phone: '' });
     } catch (error) {
-      console.error('All upload attempts failed:', error);
-      setError(error.message || "Upload failed on all attempts. Please try again.");
+      console.error('Upload error:', error);
+      setError(error.message || "Upload failed. Please try again.");
     } finally {
       setUploading(false);
     }
   };
 
-  const testApi = async () => {
-    try {
-      setError(null);
-      const response = await fetch('/api/echo');
-      const data = await response.json();
-      setError(`API echo test successful: ${JSON.stringify(data, null, 2)}`);
-    } catch (error) {
-      setError(`API echo test failed: ${error.message}`);
-    }
-  };
-
   return (
     <div className="max-w-md mx-auto bg-white p-6 rounded-xl shadow-md">
-      <button 
-        onClick={testApi}
-        className="mb-4 px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm"
-      >
-        Test API
-      </button>
-
       <form onSubmit={uploadFile} className="space-y-4">
         {success && (
           <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded relative" role="alert">
