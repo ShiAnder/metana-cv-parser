@@ -37,18 +37,52 @@ async function extractText(filePath, mimeType) {
 }
 
 // Function to upload file to Google Cloud Storage
-async function uploadToGCS(filePath, originalFilename, storage) {
+async function uploadToGCS(filePath, originalFilename) {
   try {
+    // Initialize storage with credentials from environment variable
+    const storageConfig = JSON.parse(process.env.GCS_CREDENTIALS);
+    const storage = new Storage({
+      projectId: storageConfig.project_id,
+      credentials: {
+        client_email: storageConfig.client_email,
+        private_key: storageConfig.private_key,
+      },
+    });
+
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const sanitizedFilename = `${Date.now()}-${originalFilename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
     const file = bucket.file(sanitizedFilename);
 
-    await file.save(fs.readFileSync(filePath));
+    // Upload file with proper options
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(filePath)
+        .pipe(file.createWriteStream({
+          resumable: false,
+          validation: false,
+          metadata: {
+            contentType: 'application/pdf', // Set appropriate content type
+            cacheControl: 'public, max-age=31536000',
+          },
+        }));
+
+      stream.on('error', (err) => {
+        console.error('Stream error:', err);
+        reject(err);
+      });
+
+      stream.on('finish', () => {
+        resolve();
+      });
+    });
+
+    // Make the file public
+    await file.makePublic();
+
     const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`;
     return publicUrl;
   } catch (error) {
     console.error('Error uploading file:', error);
-    throw new Error('Failed to upload to Google Cloud Storage');
+    throw new Error(`Failed to upload to Google Cloud Storage: ${error.message}`);
   }
 }
 
@@ -88,10 +122,7 @@ export default async function handler(req, res) {
       }
 
       // Upload to Google Cloud Storage
-      const cvUrl = await uploadToGCS(newFilePath, originalFilename, new Storage());
-
-      
-
+      const cvUrl = await uploadToGCS(newFilePath, originalFilename);
 
       // Prepare data to save
       const parsedData = {
