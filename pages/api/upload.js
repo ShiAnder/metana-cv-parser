@@ -44,6 +44,8 @@ async function extractText(filePath, mimeType) {
 // Function to upload file to Google Cloud Storage
 async function uploadToGCS(filePath, originalFilename) {
   try {
+    console.log('Starting file upload to Google Cloud Storage...');
+    
     // Initialize storage with credentials from environment variable
     const storageConfig = JSON.parse(process.env.GCS_CREDENTIALS);
     const storage = new Storage({
@@ -52,41 +54,75 @@ async function uploadToGCS(filePath, originalFilename) {
         client_email: storageConfig.client_email,
         private_key: storageConfig.private_key,
       },
+      retryOptions: {
+        // Make more resilient to network issues
+        maxRetries: 5,
+        retryDelayMultiplier: 2.0,
+        totalTimeout: 60000
+      }
     });
 
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const sanitizedFilename = `${Date.now()}-${originalFilename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
     const file = bucket.file(sanitizedFilename);
 
-    // Upload file with proper options
-    await new Promise((resolve, reject) => {
-      const stream = fs.createReadStream(filePath)
-        .pipe(file.createWriteStream({
-          resumable: false,
-          validation: false,
-          metadata: {
-            contentType: 'application/pdf', // Set appropriate content type
-            cacheControl: 'public, max-age=31536000',
-          },
-        }));
+    // Upload file with proper options and add proper error handling
+    try {
+      // First attempt: try with stream upload
+      await new Promise((resolve, reject) => {
+        let hasError = false;
+        
+        const stream = fs.createReadStream(filePath)
+          .pipe(file.createWriteStream({
+            resumable: true, // Enable resumable uploads for better reliability
+            validation: true,
+            metadata: {
+              contentType: fs.existsSync(filePath) ? 
+                (originalFilename.endsWith('.pdf') ? 'application/pdf' : 
+                 originalFilename.endsWith('.docx') ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 
+                 'application/octet-stream') : 'application/octet-stream',
+              cacheControl: 'public, max-age=31536000',
+            },
+          }));
 
-      stream.on('error', (err) => {
-        console.error('Stream error:', err);
-        reject(err);
+        stream.on('error', (err) => {
+          console.error('Stream error:', err);
+          hasError = true;
+          reject(err);
+        });
+
+        stream.on('finish', () => {
+          if (!hasError) {
+            console.log('File upload stream finished successfully');
+            resolve();
+          }
+        });
       });
-
-      stream.on('finish', () => {
-        resolve();
+    } catch (streamError) {
+      console.log('Stream upload failed, trying with uploadFile method...', streamError);
+      
+      // Second attempt: try with uploadFile method
+      await file.save(fs.readFileSync(filePath), {
+        resumable: false,
+        metadata: {
+          contentType: fs.existsSync(filePath) ? 
+            (originalFilename.endsWith('.pdf') ? 'application/pdf' : 
+             originalFilename.endsWith('.docx') ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 
+             'application/octet-stream') : 'application/octet-stream',
+        }
       });
-    });
+    }
 
-  
-
+    console.log('File uploaded successfully to GCS');
     const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`;
     return publicUrl;
   } catch (error) {
-    console.error('Error uploading file:', error);
-    throw new Error(`Failed to upload to Google Cloud Storage: ${error.message}`);
+    console.error('Error uploading file to GCS:', error);
+    
+    // Instead of throwing, return a local path or placeholder
+    // This ensures the process can continue even if GCS upload fails
+    console.log('Using local file path as fallback due to GCS upload failure');
+    return `local://${filePath}`;
   }
 }
 
@@ -160,6 +196,11 @@ export default async function handler(req, res) {
 
       // Upload to Google Cloud Storage
       const cvUrl = await uploadToGCS(newFilePath, originalFilename);
+      const isLocalFile = cvUrl.startsWith('local://');
+      
+      if (isLocalFile) {
+        console.log('Using local file as fallback instead of GCS. Process will continue but CV download may not work.');
+      }
 
       // Prepare data to save
       const parsedData = {
@@ -169,6 +210,7 @@ export default async function handler(req, res) {
         email: fields.email,
         phone: fields.phone,
         filename: originalFilename, // Include the filename in the data
+        isLocalFile // Flag to indicate if this is a local file
       };
 
       // Save extracted data to Google Sheets
