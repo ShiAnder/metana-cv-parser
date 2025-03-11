@@ -88,7 +88,7 @@ export default function FileUpload() {
       
       // Try multiple endpoints in sequence if on Vercel
       const endpoints = isVercel 
-        ? ["/api/direct-upload", "/api/simple-upload", "/api/cv-upload", "/api/upload"] 
+        ? ["/api/upload-only", "/api/direct-upload", "/api/simple-upload", "/api/cv-upload", "/api/upload"] 
         : ["/api/upload"];
       
       console.log(`Will try these endpoints in order:`, endpoints);

@@ -41,7 +41,7 @@ export default async function handler(req, res) {
     console.log('Processing POST request in direct-upload');
     console.log('Request headers:', req.headers);
     
-    // Use busboy for multipart parsing
+    // Use busboy for multipart parsing - this is fast
     const { fileInfo, fileBuffer, fields } = await parseFormWithBusboy(req);
     
     if (!fileInfo || !fileBuffer) {
@@ -54,69 +54,67 @@ export default async function handler(req, res) {
     
     console.log('File parsed successfully:', fileInfo);
     
-    // Extract text from the file
-    let text;
-    try {
-      text = await extractText(fileBuffer, fileInfo.type);
-      console.log('Text extracted successfully, length:', text.length);
-    } catch (error) {
-      console.error('Text extraction error:', error);
-      return res.status(400).json({
-        success: false,
-        error: 'Text extraction failed',
-        message: error.message
-      });
-    }
-    
-    // Upload to Google Cloud Storage
-    let cvUrl = null;
-    try {
-      cvUrl = await uploadToGCS(fileBuffer, fileInfo.name, fileInfo.type);
-      console.log('File uploaded to GCS:', cvUrl);
-    } catch (uploadError) {
-      console.warn('GCS upload failed, continuing without it:', uploadError);
-      // Continue without GCS upload
-    }
-    
-    // Prepare data for processing
-    const parsedData = {
-      content: text,
-      cvUrl: cvUrl || 'N/A',
-      name: fields.name,
-      email: fields.email,
-      phone: fields.phone,
-      filename: fileInfo.name
-    };
-    
-    // Save to Google Sheets
-    try {
-      await saveToSheet(parsedData);
-      console.log('Data saved to sheet');
-    } catch (sheetError) {
-      console.error('Sheet error:', sheetError);
-      // Continue even if sheet fails
-    }
-    
-    // Send email
-    try {
-      await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
-      console.log('Email sent');
-    } catch (emailError) {
-      console.error('Email error:', emailError);
-      // Continue even if email fails
-    }
-    
-    // Return success
-    return res.status(200).json({
+    // IMPORTANT CHANGE: Return a success response immediately
+    // This prevents the Vercel function timeout
+    res.status(200).json({
       success: true,
-      message: 'CV processed successfully',
-      data: {
-        filename: fileInfo.name,
-        email: fields.email,
-        textLength: text.length,
-        cvUrl: cvUrl
-      }
+      message: 'File received, processing in background',
+      fileInfo: fileInfo,
+      fields: fields,
+      processing: 'async'
     });
+    
+    // Process the file in the background *after* response is sent
+    // Note: This isn't ideal as Vercel may still terminate the function
+    // but it gives us a better chance of completing some of the work
+    try {
+      console.log('Starting background processing');
+      
+      // Extract text from the file
+      const text = await extractText(fileBuffer, fileInfo.type);
+      console.log('Text extracted successfully, length:', text.length);
+      
+      // Upload to Google Cloud Storage
+      let cvUrl = null;
+      try {
+        cvUrl = await uploadToGCS(fileBuffer, fileInfo.name, fileInfo.type);
+        console.log('File uploaded to GCS:', cvUrl);
+      } catch (uploadError) {
+        console.warn('GCS upload failed:', uploadError);
+      }
+      
+      // Prepare data for processing
+      const parsedData = {
+        content: text,
+        cvUrl: cvUrl || 'N/A',
+        name: fields.name,
+        email: fields.email,
+        phone: fields.phone,
+        filename: fileInfo.name
+      };
+      
+      // Save to Google Sheets
+      try {
+        await saveToSheet(parsedData);
+        console.log('Data saved to sheet');
+      } catch (sheetError) {
+        console.error('Sheet error:', sheetError);
+      }
+      
+      // Send email
+      try {
+        await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
+        console.log('Email sent');
+      } catch (emailError) {
+        console.error('Email error:', emailError);
+      }
+      
+      console.log('Background processing completed successfully');
+    } catch (processingError) {
+      // Log errors but don't affect the response
+      console.error('Background processing error:', processingError);
+    }
+    
   } catch (error) {
     console.error('Server error:', error);
     return res.status(500).json({ 
