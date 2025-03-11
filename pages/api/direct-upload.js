@@ -9,8 +9,14 @@ import mammoth from 'mammoth';
 export const config = {
   api: {
     bodyParser: false,
+    // Increase the maximum function execution time for Vercel
+    externalResolver: true,
   },
 };
+
+// Simple in-memory storage for uploaded files (for demo purposes)
+// Note: In production, you would use a proper database or queue system
+const PROCESSING_QUEUE = new Map();
 
 export default async function handler(req, res) {
   console.log('Direct upload API called with method:', req.method);
@@ -25,6 +31,34 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     console.log('Handling OPTIONS preflight');
     return res.status(200).end();
+  }
+  
+  // GET request to check status
+  if (req.method === 'GET') {
+    const { id } = req.query;
+    
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing id parameter',
+        message: 'Please provide an upload ID to check the status'
+      });
+    }
+    
+    const status = PROCESSING_QUEUE.get(id);
+    
+    if (!status) {
+      return res.status(404).json({
+        success: false,
+        error: 'Not found',
+        message: 'No upload found with this ID'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      status
+    });
   }
 
   // Only allow POST
@@ -54,10 +88,24 @@ export default async function handler(req, res) {
     
     console.log('File parsed successfully:', fileInfo);
     
-    // Return a fuller response with more details
+    // Generate a unique ID for this upload
+    const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    
+    // Store the initial status
+    PROCESSING_QUEUE.set(uploadId, {
+      stage: 'received',
+      progress: 0,
+      fileInfo,
+      fields,
+      startTime: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    });
+    
+    // Return a response immediately with the upload ID
     const responseData = {
       success: true,
-      message: 'File received, processing in background',
+      message: 'File received, processing started',
+      uploadId,
       fileInfo: fileInfo,
       fields: fields,
       processing: 'async',
@@ -67,73 +115,40 @@ export default async function handler(req, res) {
     // Send the response
     res.status(200).json(responseData);
     
-    // IMPORTANT: Execute the processing in a way that doesn't block the response
-    // but still completes even if Vercel tries to terminate the function
-    
     // Create an async function for background processing
-    const backgroundProcess = async () => {
+    // Note: This might not complete on Vercel due to function timeout
+    try {
+      // Start processing in the background without awaiting
+      processUpload(uploadId, fileBuffer, fileInfo, fields).catch(err => {
+        console.error('[Background] Fatal error in background processing:', err);
+        // Update status to error
+        PROCESSING_QUEUE.set(uploadId, {
+          ...PROCESSING_QUEUE.get(uploadId),
+          stage: 'error',
+          error: err.message,
+          lastUpdated: new Date().toISOString()
+        });
+      });
+      
+      // After launching the background process, try creating a "processor" webhook to continue
+      // processing if the main function times out
       try {
-        console.log('[Background] Starting background processing');
+        // Call a webhook URL to take over processing
+        // This would be an API route in your own application that handles the background processing
+        console.log('[Webhook] Attempting to call processing webhook');
         
-        // Extract text from the file
-        console.log('[Background] Extracting text from file...');
-        const text = await extractText(fileBuffer, fileInfo.type);
-        console.log('[Background] Text extracted successfully, length:', text.length);
+        // You would replace this with your own webhook URL
+        // For example: const webhookUrl = `${process.env.VERCEL_URL || 'http://localhost:3000'}/api/process-upload`;
+        // const response = await fetch(webhookUrl, { ... });
         
-        // Upload to Google Cloud Storage
-        console.log('[Background] Starting GCS upload...');
-        let cvUrl = null;
-        try {
-          cvUrl = await uploadToGCS(fileBuffer, fileInfo.name, fileInfo.type);
-          console.log('[Background] File uploaded to GCS:', cvUrl);
-        } catch (uploadError) {
-          console.error('[Background] GCS upload failed:', uploadError);
-        }
-        
-        // Prepare data for processing
-        const parsedData = {
-          content: text,
-          extractedText: text,
-          cvUrl: cvUrl || 'N/A',
-          name: fields.name,
-          email: fields.email,
-          phone: fields.phone,
-          filename: fileInfo.name,
-          mimeType: fileInfo.type,
-          size: fileInfo.size,
-          uploadDate: new Date().toISOString()
-        };
-        
-        // Save to Google Sheets
-        console.log('[Background] Saving to Google Sheets...');
-        console.log('[Background] ParsedData:', JSON.stringify(parsedData));
-        try {
-          await saveToSheet(parsedData);
-          console.log('[Background] Data saved to sheet successfully');
-        } catch (sheetError) {
-          console.error('[Background] Sheet error:', sheetError);
-        }
-        
-        // Send email
-        console.log('[Background] Sending confirmation email...');
-        try {
-          await sendConfirmationEmail(fields.name, fields.email, fileInfo.name);
-          console.log('[Background] Email sent successfully');
-        } catch (emailError) {
-          console.error('[Background] Email error:', emailError);
-        }
-        
-        console.log('[Background] Background processing completed successfully');
-      } catch (processingError) {
-        console.error('[Background] Processing error:', processingError);
+        // For now, just log that we would do this in a production system
+        console.log('[Webhook] In a production system, we would call a webhook here to continue processing');
+      } catch (webhookError) {
+        console.error('[Webhook] Error calling processing webhook:', webhookError);
       }
-    };
-    
-    // Execute the background processing
-    backgroundProcess().catch(err => {
-      console.error('[Background] Fatal error in background processing:', err);
-    });
-    
+    } catch (launchError) {
+      console.error('[Launch] Error starting background processing:', launchError);
+    }
   } catch (error) {
     console.error('Server error:', error);
     return res.status(500).json({ 
@@ -142,6 +157,138 @@ export default async function handler(req, res) {
       message: error.message || 'An unexpected error occurred'
     });
   }
+}
+
+// Process an upload with retries and status updates
+async function processUpload(uploadId, fileBuffer, fileInfo, fields) {
+  console.log(`[Process ${uploadId}] Starting processing`);
+  
+  try {
+    // Update status
+    updateStatus(uploadId, 'extracting_text', 10);
+    
+    // Extract text from the file
+    console.log(`[Process ${uploadId}] Extracting text from file...`);
+    const text = await extractText(fileBuffer, fileInfo.type);
+    console.log(`[Process ${uploadId}] Text extracted successfully, length:`, text.length);
+    
+    // Update status
+    updateStatus(uploadId, 'uploading_to_cloud', 30);
+    
+    // Upload to Google Cloud Storage with retries
+    console.log(`[Process ${uploadId}] Starting GCS upload...`);
+    let cvUrl = null;
+    try {
+      cvUrl = await uploadToGCSWithRetry(fileBuffer, fileInfo.name, fileInfo.type);
+      console.log(`[Process ${uploadId}] File uploaded to GCS:`, cvUrl);
+    } catch (uploadError) {
+      console.error(`[Process ${uploadId}] GCS upload failed after retries:`, uploadError);
+    }
+    
+    // Update status
+    updateStatus(uploadId, 'saving_to_sheets', 60);
+    
+    // Prepare data for processing
+    const parsedData = {
+      content: text,
+      extractedText: text,
+      cvUrl: cvUrl || 'N/A',
+      name: fields.name,
+      email: fields.email,
+      phone: fields.phone,
+      filename: fileInfo.name,
+      mimeType: fileInfo.type,
+      size: fileInfo.size,
+      uploadDate: new Date().toISOString()
+    };
+    
+    // Save to Google Sheets with retries
+    console.log(`[Process ${uploadId}] Saving to Google Sheets...`);
+    console.log(`[Process ${uploadId}] ParsedData:`, JSON.stringify(parsedData));
+    try {
+      await saveToSheetWithRetry(parsedData);
+      console.log(`[Process ${uploadId}] Data saved to sheet successfully`);
+    } catch (sheetError) {
+      console.error(`[Process ${uploadId}] Sheet error after retries:`, sheetError);
+      throw sheetError; // Propagate this error
+    }
+    
+    // Update status
+    updateStatus(uploadId, 'sending_email', 80);
+    
+    // Send email with retries
+    console.log(`[Process ${uploadId}] Sending confirmation email...`);
+    try {
+      await sendEmailWithRetry(fields.name, fields.email, fileInfo.name);
+      console.log(`[Process ${uploadId}] Email sent successfully`);
+    } catch (emailError) {
+      console.error(`[Process ${uploadId}] Email error:`, emailError);
+      // Continue even if email fails
+    }
+    
+    // Update final status
+    updateStatus(uploadId, 'completed', 100);
+    console.log(`[Process ${uploadId}] Background processing completed successfully`);
+  } catch (processingError) {
+    console.error(`[Process ${uploadId}] Processing error:`, processingError);
+    
+    // Update error status
+    PROCESSING_QUEUE.set(uploadId, {
+      ...PROCESSING_QUEUE.get(uploadId),
+      stage: 'error',
+      error: processingError.message,
+      lastUpdated: new Date().toISOString()
+    });
+  }
+}
+
+// Helper to update status
+function updateStatus(uploadId, stage, progress) {
+  const current = PROCESSING_QUEUE.get(uploadId) || {};
+  PROCESSING_QUEUE.set(uploadId, {
+    ...current,
+    stage,
+    progress,
+    lastUpdated: new Date().toISOString()
+  });
+  console.log(`[Status ${uploadId}] Updated to ${stage} (${progress}%)`);
+}
+
+// Helper for retrying operations
+async function retryOperation(operation, maxRetries = 3, retryDelay = 1000) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      console.log(`Retry attempt ${attempt}/${maxRetries} failed:`, error.message);
+      
+      if (attempt < maxRetries) {
+        // Wait before retry with exponential backoff
+        const delay = retryDelay * Math.pow(2, attempt - 1);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
+// Wrapper for uploadToGCS with retries
+async function uploadToGCSWithRetry(buffer, filename, mimeType) {
+  return retryOperation(() => uploadToGCS(buffer, filename, mimeType));
+}
+
+// Wrapper for saveToSheet with retries
+async function saveToSheetWithRetry(data) {
+  return retryOperation(() => saveToSheet(data));
+}
+
+// Wrapper for sendConfirmationEmail with retries
+async function sendEmailWithRetry(name, email, filename) {
+  return retryOperation(() => sendConfirmationEmail(name, email, filename));
 }
 
 // Parse form data with busboy
@@ -294,7 +441,7 @@ async function uploadToGCS(buffer, filename, mimeType) {
     privateKey = privateKey || process.env.GOOGLE_PRIVATE_KEY || process.env.GCP_PRIVATE_KEY;
     clientEmail = clientEmail || process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GCP_CLIENT_EMAIL;
     
-    console.log(`Final credentials: projectId=${projectId ? 'present' : 'missing'}, bucketName=${bucketName ? 'present' : 'missing'}, privateKey=${privateKey ? 'present' : 'missing'}, clientEmail=${clientEmail ? 'present' : 'missing'}`);
+    console.log(`Final credentials: projectId=${projectId ? 'present' : 'missing'}, bucketName=${bucketName ? 'present' : 'missing'}, privateKey=${privateKey ? 'present(length:' + (privateKey?.length || 0) + ')' : 'missing'}, clientEmail=${clientEmail ? 'present' : 'missing'}`);
     
     if (!projectId || !bucketName) {
       console.warn('Missing GCS environment variables - saving file locally instead');
