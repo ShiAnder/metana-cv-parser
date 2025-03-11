@@ -73,47 +73,72 @@ export default function FileUpload() {
       setError(null);
       setSuccess(false);
 
-      // Use the new endpoint for Vercel deployments
+      // Determine if we're in the Vercel environment
       const isVercel = window.location.hostname.includes('vercel.app');
-      const uploadUrl = isVercel ? "/api/cv-upload" : "/api/upload";
-      console.log(`Using upload endpoint: ${uploadUrl}`);
-
-      const response = await fetch(uploadUrl, {
-        method: "POST",
-        body: form,
-        // Don't set Content-Type header - browser will set it with boundary for FormData
-      });
-
-      console.log('Response status:', response.status);
       
-      // Handle non-JSON responses
-      const contentType = response.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        const text = await response.text();
-        console.error('Non-JSON response:', text);
-        throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}...`);
-      }
-
-      // Parse JSON response safely
-      let data;
-      try {
-        data = await response.json();
-        console.log('Response data:', data);
-      } catch (jsonError) {
-        console.error('JSON parsing error:', jsonError);
-        throw new Error(`Failed to parse JSON response: ${jsonError.message}`);
+      // Try multiple endpoints in sequence if on Vercel
+      const endpoints = isVercel 
+        ? ["/api/simple-upload", "/api/cv-upload", "/api/upload"] 
+        : ["/api/upload"];
+      
+      console.log(`Will try these endpoints in order:`, endpoints);
+      
+      let lastError = null;
+      let success = false;
+      
+      // Try each endpoint until one works
+      for (const endpoint of endpoints) {
+        if (success) break;
+        
+        try {
+          console.log(`Trying endpoint: ${endpoint}`);
+          
+          const response = await fetch(endpoint, {
+            method: "POST",
+            body: form,
+          });
+          
+          console.log(`Response from ${endpoint}:`, {
+            status: response.status,
+            statusText: response.statusText,
+          });
+          
+          // Handle non-JSON responses
+          const contentType = response.headers.get("content-type");
+          if (!contentType || !contentType.includes("application/json")) {
+            const text = await response.text();
+            console.warn(`Non-JSON response from ${endpoint}:`, text.substring(0, 100));
+            throw new Error(`Server returned non-JSON response`);
+          }
+          
+          // Parse JSON response
+          const data = await response.json();
+          console.log(`JSON data from ${endpoint}:`, data);
+          
+          if (response.ok && data?.success) {
+            console.log(`Successful upload using ${endpoint}`);
+            success = true;
+            
+            setSuccess(true);
+            setFile(null);
+            setFormData({ name: '', email: '', phone: '' });
+            break;
+          } else {
+            throw new Error(data?.message || data?.error || `Upload failed with status ${response.status}`);
+          }
+        } catch (endpointError) {
+          console.warn(`Error with endpoint ${endpoint}:`, endpointError);
+          lastError = endpointError;
+          // Continue to next endpoint
+        }
       }
       
-      if (!response.ok || !data?.success) {
-        throw new Error(data?.message || data?.error || 'Upload failed');
+      if (!success && lastError) {
+        throw lastError;
       }
-
-      setSuccess(true);
-      setFile(null);
-      setFormData({ name: '', email: '', phone: '' });
     } catch (error) {
-      console.error('Upload error:', error);
-      setError(error.message || "Upload failed. Please try again.");
+      console.error('All upload attempts failed:', error);
+      setError(error.message || "Upload failed on all attempts. Please try again.");
     } finally {
       setUploading(false);
     }

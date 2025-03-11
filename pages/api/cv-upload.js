@@ -20,13 +20,17 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
 
+  console.log('CV upload API called with method:', req.method);
+
   // Handle OPTIONS request
   if (req.method === 'OPTIONS') {
+    console.log('Handling OPTIONS request');
     return res.status(200).end();
   }
 
   // Only allow POST
   if (req.method !== 'POST') {
+    console.log(`Method ${req.method} not allowed`);
     return res.status(405).json({ 
       success: false, 
       error: 'Method not allowed',
@@ -35,7 +39,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    console.log('CV upload API called');
+    console.log('Processing POST request for CV upload');
 
     // Parse form using promise wrapper
     const formData = await parseForm(req);
@@ -56,17 +60,32 @@ export default async function handler(req, res) {
 
     // Get file content as buffer
     let fileBuffer;
-    if (file.filepath && typeof file.filepath.getBuffer === 'function') {
-      fileBuffer = file.filepath.getBuffer();
+    console.log('File object properties:', Object.keys(file));
+    
+    if (file.filepath) {
+      // For local dev environment
+      const fs = require('fs');
+      fileBuffer = fs.readFileSync(file.filepath);
+      console.log('Read file from filepath:', file.filepath);
     } else if (file.buffer) {
+      // For some Vercel environments
       fileBuffer = file.buffer;
+      console.log('Using buffer property');
+    } else if (file.path) {
+      // For other Vercel environments
+      const fs = require('fs');
+      fileBuffer = fs.readFileSync(file.path);
+      console.log('Read file from path:', file.path);
     } else {
+      console.error('No file path or buffer available:', file);
       return res.status(500).json({
         success: false,
         error: 'File processing error',
-        message: 'Unable to read file content'
+        message: 'Unable to access file content'
       });
     }
+    
+    console.log('File buffer obtained, size:', fileBuffer.length);
 
     // Extract text based on mimetype
     let text;
@@ -140,28 +159,32 @@ export default async function handler(req, res) {
 // Simple form parser for Vercel
 function parseForm(req) {
   return new Promise((resolve, reject) => {
+    console.log('Starting form parsing');
+    
+    // Create formidable instance with simpler config for Vercel
     const form = new IncomingForm({
       keepExtensions: true,
       maxFileSize: 10 * 1024 * 1024,
       multiples: false,
-      fileWriteStreamHandler: () => {
-        const chunks = [];
-        return {
-          write: (chunk) => {
-            chunks.push(chunk);
-            return true;
-          },
-          end: () => {},
-          destroy: () => {},
-          getBuffer: () => Buffer.concat(chunks),
-        };
-      },
+      // Remove fileWriteStreamHandler to use default memory storage
     });
 
     form.parse(req, (err, fields, files) => {
       if (err) {
+        console.error('Form parsing error:', err);
         return reject(err);
       }
+      
+      console.log('Form parsed successfully:', {
+        fieldKeys: Object.keys(fields),
+        fileKeys: Object.keys(files),
+        fileInfo: files.file ? {
+          size: files.file.size,
+          name: files.file.originalFilename,
+          type: files.file.mimetype
+        } : 'No file found'
+      });
+      
       resolve({ fields, files });
     });
   });
