@@ -1,51 +1,56 @@
 import { IncomingForm } from 'formidable';
-import fs from 'fs';
-import path from 'path';
 import { Storage } from '@google-cloud/storage';
-import saveToSheet from '../../lib/cvParser'; // Import the updated saveToSheet function
-import sendConfirmationEmail from '../../lib/emailSender'; // Import the email sender
-import pdf from 'pdf-parse';
+import saveToSheet from '../../lib/cvParser';
+import sendConfirmationEmail from '../../lib/emailSender';
+import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 
-// Ensure the temp directory exists
-const tempDir = path.resolve('./temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
-
+// Vercel has a body size limit of 4.5MB
 export const config = {
   api: {
-    bodyParser: false, // Disable Next.js default body parsing to handle file uploads
+    bodyParser: false,
+    responseLimit: false,
   },
 };
 
-// Function to extract text from a file (PDF/Word)
-async function extractText(filePath, mimeType) {
+// Function to extract text from PDF buffer
+async function extractTextFromPDF(buffer) {
   try {
-    console.log('Extracting text from file with mimetype:', mimeType);
-    const buffer = fs.readFileSync(filePath);
-    
-    if (mimeType === 'application/pdf') {
-      const data = await pdf(new Uint8Array(buffer));
-      return data.text;
-    } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      const data = await mammoth.extractRawText({ buffer });
-      return data.value;
-    } else if (mimeType === 'text/plain') {
-      return buffer.toString('utf8');
-    }
-    
-    throw new Error(`Unsupported file format: ${mimeType}. Only PDF and DOCX files are currently supported.`);
+    const pdfData = await pdfParse(buffer);
+    return pdfData.text;
   } catch (error) {
-    console.error('Error extracting text:', error);
-    throw new Error(`Failed to extract text from file: ${error.message}`);
+    console.error('Error extracting text from PDF:', error);
+    throw new Error(`Failed to extract text from PDF: ${error.message}`);
   }
 }
 
-// Function to upload file to Google Cloud Storage
-async function uploadToGCS(filePath, originalFilename) {
+// Function to extract text from DOCX buffer
+async function extractTextFromDOCX(buffer) {
   try {
-    console.log('Starting file upload to Google Cloud Storage...');
+    const docxData = await mammoth.extractRawText({ buffer });
+    return docxData.value;
+  } catch (error) {
+    console.error('Error extracting text from DOCX:', error);
+    throw new Error(`Failed to extract text from DOCX: ${error.message}`);
+  }
+}
+
+// Function to extract text based on mime type
+async function extractText(buffer, mimeType) {
+  if (mimeType === 'application/pdf') {
+    return extractTextFromPDF(buffer);
+  } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return extractTextFromDOCX(buffer);
+  } else if (mimeType === 'text/plain') {
+    return buffer.toString('utf8');
+  }
+  throw new Error(`Unsupported file type: ${mimeType}`);
+}
+
+// Function to upload buffer to Google Cloud Storage
+async function uploadToGCS(buffer, filename, mimeType) {
+  try {
+    console.log('Uploading to Google Cloud Storage...');
     
     // Initialize storage with credentials from environment variable
     const storageConfig = JSON.parse(process.env.GCS_CREDENTIALS);
@@ -55,193 +60,195 @@ async function uploadToGCS(filePath, originalFilename) {
         client_email: storageConfig.client_email,
         private_key: storageConfig.private_key,
       },
-      retryOptions: {
-        // Make more resilient to network issues
-        maxRetries: 5,
-        retryDelayMultiplier: 2.0,
-        totalTimeout: 60000
-      }
     });
 
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
-    const sanitizedFilename = `${Date.now()}-${originalFilename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
+    const sanitizedFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
     const file = bucket.file(sanitizedFilename);
 
-    // Upload file with proper options and add proper error handling
-    try {
-      // First attempt: try with stream upload
-      await new Promise((resolve, reject) => {
-        let hasError = false;
-        
-        const stream = fs.createReadStream(filePath)
-          .pipe(file.createWriteStream({
-            resumable: true, // Enable resumable uploads for better reliability
-            validation: true,
-            metadata: {
-              contentType: fs.existsSync(filePath) ? 
-                (originalFilename.endsWith('.pdf') ? 'application/pdf' : 
-                 originalFilename.endsWith('.docx') ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 
-                 'application/octet-stream') : 'application/octet-stream',
-              cacheControl: 'public, max-age=31536000',
-            },
-          }));
+    // Upload buffer directly
+    await file.save(buffer, {
+      metadata: {
+        contentType: mimeType,
+        cacheControl: 'public, max-age=31536000',
+      },
+    });
 
-        stream.on('error', (err) => {
-          console.error('Stream error:', err);
-          hasError = true;
-          reject(err);
-        });
-
-        stream.on('finish', () => {
-          if (!hasError) {
-            console.log('File upload stream finished successfully');
-            resolve();
-          }
-        });
-      });
-    } catch (streamError) {
-      console.log('Stream upload failed, trying with uploadFile method...', streamError);
-      
-      // Second attempt: try with uploadFile method
-      await file.save(fs.readFileSync(filePath), {
-        resumable: false,
-        metadata: {
-          contentType: fs.existsSync(filePath) ? 
-            (originalFilename.endsWith('.pdf') ? 'application/pdf' : 
-             originalFilename.endsWith('.docx') ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 
-             'application/octet-stream') : 'application/octet-stream',
-        }
-      });
-    }
-
-    console.log('File uploaded successfully to GCS');
     const publicUrl = `https://storage.googleapis.com/${process.env.GCS_BUCKET_NAME}/${sanitizedFilename}`;
     return publicUrl;
   } catch (error) {
-    console.error('Error uploading file to GCS:', error);
-    
-    // Instead of throwing, return a local path or placeholder
-    // This ensures the process can continue even if GCS upload fails
-    console.log('Using local file path as fallback due to GCS upload failure');
-    return `local://${filePath}`;
+    console.error('Error uploading to GCS:', error);
+    return null; // Return null instead of throwing to allow the process to continue
   }
+}
+
+// Parse the multipart form data in memory
+function parseForm(req) {
+  return new Promise((resolve, reject) => {
+    // Configure formidable to keep files in memory as buffers
+    const form = new IncomingForm({
+      keepExtensions: true,
+      maxFileSize: 10 * 1024 * 1024, // 10MB limit
+      multiples: false,
+      // In Vercel, don't specify uploadDir as we're keeping files in memory
+      fileWriteStreamHandler: () => {
+        // Use a custom stream that collects chunks in memory
+        const chunks = [];
+        return {
+          write: (chunk) => {
+            chunks.push(chunk);
+            return true;
+          },
+          end: () => {},
+          destroy: () => {},
+          // Store the assembled buffer on the stream object
+          getBuffer: () => Buffer.concat(chunks),
+        };
+      },
+    });
+
+    form.parse(req, (err, fields, files) => {
+      if (err) {
+        return reject(err);
+      }
+      
+      resolve({ fields, files });
+    });
+  });
 }
 
 // Main handler function for file upload
 export default async function handler(req, res) {
-  // Only allow POST requests
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed', details: 'Only POST requests are allowed' });
+  // Cross-origin headers for the API
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+
+  // Handle preflight request
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
   }
 
-  const form = new IncomingForm({
-    keepExtensions: true,
-    uploadDir: tempDir,
-    multiples: false,
-  });
+  // Only allow POST for actual uploads
+  if (req.method !== 'POST') {
+    return res.status(405).json({
+      success: false,
+      error: 'Method not allowed',
+      message: 'Only POST requests are allowed'
+    });
+  }
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      console.error('Error in form parsing:', err);
-      return res.status(400).json({ error: 'File upload failed', details: err.message });
-    }
-
-    try {
-      const uploadedFile = files.file ? (Array.isArray(files.file) ? files.file[0] : files.file) : null;
-      if (!uploadedFile) {
-        return res.status(400).json({ error: 'No file uploaded or incorrect field name' });
-      }
-
-      const mimeType = uploadedFile.mimetype;
-      console.log('Uploaded file type:', mimeType, 'File name:', uploadedFile.originalFilename);
-      const originalFilename = uploadedFile.originalFilename;
-      const tempFilePath = uploadedFile.filepath;
-      const newFilePath = path.join(tempDir, originalFilename);
-
-      // Rename file to keep original filename
-      fs.renameSync(tempFilePath, newFilePath);
-
-      // Check if file type is supported
-      const supportedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
-      if (!supportedTypes.includes(mimeType)) {
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        return res.status(400).json({ 
-          error: 'Unsupported file format', 
-          details: `File type ${mimeType} is not supported. Please upload a PDF or DOCX file.` 
-        });
-      }
-
-      // Extract text from the renamed file
-      let text;
-      try {
-        text = await extractText(newFilePath, mimeType);
-      } catch (error) {
-        console.error('Text extraction error:', error);
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        return res.status(400).json({ 
-          error: 'Text extraction failed', 
-          details: `Could not extract text from the file. Please ensure it's a valid ${mimeType === 'application/pdf' ? 'PDF' : 'DOCX'} file.`
-        });
-      }
-
-      if (!text) {
-        // Clean up the file
-        try { fs.unlinkSync(newFilePath); } catch (e) { console.error('Error deleting file:', e); }
-        
-        throw new Error('Failed to extract text from file');
-      }
-
-      // Upload to Google Cloud Storage
-      const cvUrl = await uploadToGCS(newFilePath, originalFilename);
-      const isLocalFile = cvUrl.startsWith('local://');
-      
-      if (isLocalFile) {
-        console.log('Using local file as fallback instead of GCS. Process will continue but CV download may not work.');
-      }
-
-      // Prepare data to save
-      const parsedData = {
-        content: text,
-        cvUrl,
-        name: fields.name,
-        email: fields.email,
-        phone: fields.phone,
-        filename: originalFilename, // Include the filename in the data
-        isLocalFile // Flag to indicate if this is a local file
-      };
-
-      // Save extracted data to Google Sheets
-      try {
-        await saveToSheet(parsedData);
-        console.log("Data successfully saved to Google Sheets");
-      } catch (sheetError) {
-        console.error("Error saving to Google Sheets:", sheetError);
-        // Continue with the response even if sheet saving fails
-      }
-
-      console.log("This is the parsed data in upload.js:", parsedData);
-
-      // Send confirmation email
-      try {
-        await sendConfirmationEmail(fields.name, fields.email, originalFilename);
-        console.log("Confirmation email sent successfully");
-      } catch (emailError) {
-        console.error("Error sending confirmation email:", emailError);
-        // Continue with the response even if email sending fails
-      }
-
-      // Return success response
-      return res.status(200).json({ 
-        success: true,
-        message: 'CV processed successfully' 
+  try {
+    console.log('Processing upload request...');
+    
+    // Parse the form data
+    const { fields, files } = await parseForm(req);
+    
+    const uploadedFile = files.file ? (Array.isArray(files.file) ? files.file[0] : files.file) : null;
+    if (!uploadedFile) {
+      return res.status(400).json({
+        success: false,
+        error: 'No file uploaded',
+        message: 'No file was uploaded or the field name is incorrect'
       });
-    } catch (error) {
-      console.error('Error processing request:', error);
-      return res.status(500).json({ error: 'Internal server error', details: error.message });
     }
-  });
+
+    const mimeType = uploadedFile.mimetype;
+    const originalFilename = uploadedFile.originalFilename;
+    
+    console.log(`File received: ${originalFilename} (${mimeType})`);
+
+    // Check if file type is supported
+    const supportedTypes = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain'
+    ];
+    
+    if (!supportedTypes.includes(mimeType)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Unsupported file format',
+        message: `File type ${mimeType} is not supported. Please upload a PDF or DOCX file.`
+      });
+    }
+
+    // For Vercel, we need to get the file buffer from our custom file write stream
+    // This assumes you're using the fileWriteStreamHandler in the IncomingForm options
+    const fileBuffer = uploadedFile.filepath.getBuffer();
+    
+    if (!fileBuffer || fileBuffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Empty file',
+        message: 'The uploaded file appears to be empty'
+      });
+    }
+
+    // Extract text from the file buffer
+    let text;
+    try {
+      text = await extractText(fileBuffer, mimeType);
+      if (!text || text.trim() === '') {
+        throw new Error('No text could be extracted from the file');
+      }
+    } catch (error) {
+      console.error('Text extraction error:', error);
+      return res.status(400).json({
+        success: false,
+        error: 'Text extraction failed',
+        message: error.message || `Could not extract text from the file. Please ensure it's a valid file.`
+      });
+    }
+
+    // Upload to Google Cloud Storage directly from buffer
+    const cvUrl = await uploadToGCS(fileBuffer, originalFilename, mimeType);
+    
+    // Prepare data to save
+    const parsedData = {
+      content: text,
+      cvUrl: cvUrl || 'N/A',
+      name: fields.name,
+      email: fields.email,
+      phone: fields.phone,
+      filename: originalFilename,
+      isLocalFile: !cvUrl
+    };
+
+    // Save extracted data to Google Sheets
+    try {
+      await saveToSheet(parsedData);
+      console.log("Data successfully saved to Google Sheets");
+    } catch (sheetError) {
+      console.error("Error saving to Google Sheets:", sheetError);
+      // Continue processing even if sheet saving fails
+    }
+
+    // Send confirmation email
+    try {
+      await sendConfirmationEmail(fields.name, fields.email, originalFilename);
+      console.log("Confirmation email sent successfully");
+    } catch (emailError) {
+      console.error("Error sending confirmation email:", emailError);
+      // Continue processing even if email sending fails
+    }
+
+    // Return success response
+    return res.status(200).json({
+      success: true,
+      message: 'CV processed successfully',
+      data: {
+        filename: originalFilename,
+        email: fields.email
+      }
+    });
+  } catch (error) {
+    console.error('Error processing upload:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message || 'An unexpected error occurred'
+    });
+  }
 }
