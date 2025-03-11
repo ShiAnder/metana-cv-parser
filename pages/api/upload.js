@@ -85,13 +85,26 @@ async function uploadToGCS(buffer, filename, mimeType) {
 // Parse the multipart form data in memory
 function parseForm(req) {
   return new Promise((resolve, reject) => {
+    // Check if req.body already exists (for some environments)
+    if (req.body && Object.keys(req.body).length > 0) {
+      console.log('Request body already parsed, using existing data');
+      return resolve({ 
+        fields: req.body, 
+        files: req.files || {} 
+      });
+    }
+
     // Configure formidable to keep files in memory as buffers
-    const form = new IncomingForm({
+    const options = {
       keepExtensions: true,
       maxFileSize: 10 * 1024 * 1024, // 10MB limit
       multiples: false,
-      // In Vercel, don't specify uploadDir as we're keeping files in memory
-      fileWriteStreamHandler: () => {
+    };
+
+    // In Vercel, use memory storage
+    if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+      console.log('Running in Vercel/production, using in-memory file handling');
+      options.fileWriteStreamHandler = () => {
         // Use a custom stream that collects chunks in memory
         const chunks = [];
         return {
@@ -104,13 +117,19 @@ function parseForm(req) {
           // Store the assembled buffer on the stream object
           getBuffer: () => Buffer.concat(chunks),
         };
-      },
-    });
+      };
+    }
+
+    const form = new IncomingForm(options);
 
     form.parse(req, (err, fields, files) => {
       if (err) {
+        console.error('Form parsing error:', err);
         return reject(err);
       }
+      
+      console.log('Successfully parsed form with fields:', Object.keys(fields));
+      console.log('Files received:', files.file ? 'Yes' : 'No');
       
       resolve({ fields, files });
     });
@@ -119,23 +138,30 @@ function parseForm(req) {
 
 // Main handler function for file upload
 export default async function handler(req, res) {
-  // Cross-origin headers for the API
+  console.log('------ API ROUTE CALLED ------');
+  console.log('Request method:', req.method);
+  console.log('Request headers:', JSON.stringify(req.headers));
+  
+  // CRITICAL: Cross-origin headers for Vercel must be set FIRST, before any logic
   res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Or specify your domain
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-  // Handle preflight request
+  // Handle OPTIONS request (preflight) immediately
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(200).end();
+    return;
   }
 
   // Only allow POST for actual uploads
   if (req.method !== 'POST') {
+    console.log(`Rejected method: ${req.method}`);
     return res.status(405).json({
       success: false,
       error: 'Method not allowed',
-      message: 'Only POST requests are allowed'
+      message: 'Only POST requests are allowed',
+      requestMethod: req.method
     });
   }
 
@@ -143,7 +169,19 @@ export default async function handler(req, res) {
     console.log('Processing upload request...');
     
     // Parse the form data
-    const { fields, files } = await parseForm(req);
+    let fields, files;
+    try {
+      const result = await parseForm(req);
+      fields = result.fields;
+      files = result.files;
+    } catch (parseError) {
+      console.error('Form parsing error:', parseError);
+      return res.status(400).json({
+        success: false,
+        error: 'Upload failed',
+        message: `Could not parse form data: ${parseError.message}`
+      });
+    }
     
     const uploadedFile = files.file ? (Array.isArray(files.file) ? files.file[0] : files.file) : null;
     if (!uploadedFile) {
@@ -176,7 +214,34 @@ export default async function handler(req, res) {
 
     // For Vercel, we need to get the file buffer from our custom file write stream
     // This assumes you're using the fileWriteStreamHandler in the IncomingForm options
-    const fileBuffer = uploadedFile.filepath.getBuffer();
+    let fileBuffer;
+    if (typeof uploadedFile.filepath.getBuffer === 'function') {
+      // In-memory buffer (Vercel/production)
+      fileBuffer = uploadedFile.filepath.getBuffer();
+    } else if (uploadedFile.buffer) {
+      // Already has buffer
+      fileBuffer = uploadedFile.buffer;
+    } else if (typeof uploadedFile.filepath === 'string') {
+      // Local file path (development only)
+      try {
+        const fs = require('fs');
+        fileBuffer = fs.readFileSync(uploadedFile.filepath);
+      } catch (readError) {
+        console.error('Error reading file:', readError);
+        return res.status(500).json({
+          success: false,
+          error: 'File read error',
+          message: 'Could not read the uploaded file'
+        });
+      }
+    } else {
+      console.error('Unsupported file object structure:', Object.keys(uploadedFile));
+      return res.status(500).json({
+        success: false,
+        error: 'Unsupported file structure',
+        message: 'The uploaded file format is not supported by the server'
+      });
+    }
     
     if (!fileBuffer || fileBuffer.length === 0) {
       return res.status(400).json({

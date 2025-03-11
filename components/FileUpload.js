@@ -73,15 +73,35 @@ export default function FileUpload() {
       setError(null);
       setSuccess(false);
 
+      console.log('Sending request to /api/upload...');
       const response = await fetch("/api/upload", {
         method: "POST",
         body: form,
+        // Don't set Content-Type header - browser will set it with boundary for FormData
       });
 
-      const data = await response.json();
+      console.log('Response status:', response.status);
+      
+      // Handle non-JSON responses
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        const text = await response.text();
+        console.error('Non-JSON response:', text);
+        throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}...`);
+      }
+
+      // Parse JSON response safely
+      let data;
+      try {
+        data = await response.json();
+        console.log('Response data:', data);
+      } catch (jsonError) {
+        console.error('JSON parsing error:', jsonError);
+        throw new Error(`Failed to parse JSON response: ${jsonError.message}`);
+      }
       
       if (!response.ok || !data?.success) {
-        throw new Error(data?.error || data?.message || 'Upload failed');
+        throw new Error(data?.message || data?.error || 'Upload failed');
       }
 
       setSuccess(true);
