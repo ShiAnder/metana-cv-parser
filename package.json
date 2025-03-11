@@ -12,6 +12,7 @@
     "@google-cloud/storage": "^7.15.2",
     "aws-sdk": "^2.1692.0",
     "axios": "^1.8.2",
+    "busboy": "^1.6.0",
     "dotenv": "^16.4.7",
     "file-type": "^20.4.0",
     "formidable": "^3.5.2",

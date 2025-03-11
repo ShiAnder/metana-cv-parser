@@ -35,31 +35,53 @@ export default async function handler(req, res) {
 
   try {
     console.log('Processing POST request');
+    console.log('Request headers:', req.headers);
     
-    // Use a basic promise wrapper for formidable
-    const formData = await new Promise((resolve, reject) => {
-      const form = new IncomingForm({ 
-        maxFileSize: 10 * 1024 * 1024 // 10MB 
+    // Create an array to store raw request data chunks
+    const chunks = [];
+    let rawBodySize = 0;
+    
+    // Process the raw request body
+    await new Promise((resolve, reject) => {
+      req.on('data', (chunk) => {
+        chunks.push(chunk);
+        rawBodySize += chunk.length;
+        console.log(`Received chunk: ${chunk.length} bytes`);
       });
       
-      form.parse(req, (err, fields, files) => {
-        if (err) {
-          console.error('Form parsing error:', err);
-          return reject(err);
-        }
-        resolve({ fields, files });
+      req.on('end', () => {
+        console.log(`Received total: ${rawBodySize} bytes`);
+        resolve();
+      });
+      
+      req.on('error', (err) => {
+        console.error('Error in request stream:', err);
+        reject(err);
       });
     });
     
-    // Basic success response without doing any actual processing
+    // Create a buffer from all chunks
+    const buffer = Buffer.concat(chunks);
+    console.log(`Buffer size: ${buffer.length} bytes`);
+    
+    // Get content type to determine boundary
+    const contentType = req.headers['content-type'];
+    
+    console.log('Content type:', contentType);
+    
+    // Simplified handling - just acknowledge receipt
+    // In a real implementation, you'd parse the multipart form data
+    // but this at least confirms we're receiving data
     return res.status(200).json({
       success: true,
       message: 'Upload received',
-      fileInfo: formData.files.file ? {
-        name: formData.files.file.originalFilename || formData.files.file.name || 'unknown',
-        type: formData.files.file.mimetype || 'unknown',
-        size: formData.files.file.size || 0
-      } : 'No file received'
+      fileInfo: {
+        receivedBytes: buffer.length,
+        contentType: contentType,
+        boundary: contentType && contentType.includes('boundary=') 
+          ? contentType.split('boundary=')[1].trim() 
+          : 'No boundary found'
+      }
     });
   } catch (error) {
     console.error('Server error:', error);

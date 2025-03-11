@@ -68,6 +68,16 @@ export default function FileUpload() {
       form.append(key, value);
     });
 
+    // Log every field in the FormData
+    console.log('FormData contents:');
+    for (const pair of form.entries()) {
+      if (pair[0] === 'file') {
+        console.log(pair[0], ':', pair[1].name, pair[1].type, pair[1].size);
+      } else {
+        console.log(pair[0], ':', pair[1]);
+      }
+    }
+
     try {
       setUploading(true);
       setError(null);
@@ -78,7 +88,7 @@ export default function FileUpload() {
       
       // Try multiple endpoints in sequence if on Vercel
       const endpoints = isVercel 
-        ? ["/api/simple-upload", "/api/cv-upload", "/api/upload"] 
+        ? ["/api/direct-upload", "/api/simple-upload", "/api/cv-upload", "/api/upload"] 
         : ["/api/upload"];
       
       console.log(`Will try these endpoints in order:`, endpoints);
@@ -101,6 +111,7 @@ export default function FileUpload() {
           console.log(`Response from ${endpoint}:`, {
             status: response.status,
             statusText: response.statusText,
+            headers: Object.fromEntries([...response.headers.entries()]),
           });
           
           // Handle non-JSON responses
@@ -117,12 +128,31 @@ export default function FileUpload() {
           
           if (response.ok && data?.success) {
             console.log(`Successful upload using ${endpoint}`);
-            success = true;
             
-            setSuccess(true);
-            setFile(null);
-            setFormData({ name: '', email: '', phone: '' });
-            break;
+            // Log details about the response for debugging
+            if (endpoint === '/api/simple-upload' && data.fileInfo) {
+              console.log('Simple upload details:', {
+                receivedBytes: data.fileInfo.receivedBytes,
+                originalFileSize: file.size,
+                ratio: data.fileInfo.receivedBytes / file.size,
+                contentType: data.fileInfo.contentType
+              });
+              
+              // Consider the upload successful even if simple-upload doesn't process the file
+              // since we're just trying to confirm data transmission works
+              success = true;
+              setSuccess(true);
+              setError(`Your file was received (${data.fileInfo.receivedBytes} bytes). ` +
+                "This is a test endpoint that confirms data transmission works.");
+              break;
+            } else {
+              // Normal success case
+              success = true;
+              setSuccess(true);
+              setFile(null);
+              setFormData({ name: '', email: '', phone: '' });
+              break;
+            }
           } else {
             throw new Error(data?.message || data?.error || `Upload failed with status ${response.status}`);
           }
@@ -147,11 +177,11 @@ export default function FileUpload() {
   const testApi = async () => {
     try {
       setError(null);
-      const response = await fetch('/api/test');
+      const response = await fetch('/api/echo');
       const data = await response.json();
-      setError(`API test successful: ${JSON.stringify(data)}`);
+      setError(`API echo test successful: ${JSON.stringify(data, null, 2)}`);
     } catch (error) {
-      setError(`API test failed: ${error.message}`);
+      setError(`API echo test failed: ${error.message}`);
     }
   };
 
