@@ -11,15 +11,21 @@
   "dependencies": {
     "@google-cloud/storage": "^7.15.2",
     "aws-sdk": "^2.1692.0",
+    "axios": "^1.8.2",
     "dotenv": "^16.4.7",
+    "file-type": "^20.4.0",
     "formidable": "^3.5.2",
     "google-spreadsheet": "^4.1.4",
     "googleapis": "^146.0.0",
+    "ibm-watson": "^10.0.0",
     "mammoth": "^1.9.0",
     "next": "15.2.1",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.86.2",
     "pdf-parse": "^1.1.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "spacy": "^0.0.4"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

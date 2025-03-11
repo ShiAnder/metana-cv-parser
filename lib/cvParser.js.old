@@ -1,0 +1,115 @@
+import OpenAI from "openai"; // Import OpenAI SDK
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
+import dotenv from "dotenv";
+
+dotenv.config({ path: ".env.local" }); // Load environment variables
+
+// OpenAI API Key and Organization ID from environment variables
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // Ensure API key is loaded from .env.local
+  organization: process.env.OPENAI_ORG_ID,
+});
+
+async function analyzeCVWithChatGPT(text) {
+  try {
+    console.log("CV Text for OpenAI Analysis:", text);
+
+    if (text.includes('Unterminated string')) {
+      throw new Error('CV contains invalid JSON format.');
+    }
+
+    // Proceed with OpenAI analysis
+    const response = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: [
+        { role: "system", content: "Extract structured information from the given resume text into a structured JSON format." },
+        { role: "user", content: `Extract the following details from the CV:\n
+          - Personal Information: Name, Email, Phone, Address, NIC, LinkedIn, GitHub\n
+          - Education: Degree Type, Field of Study, Institution, Period, Details\n
+          - Experience: Job Title, Company, Period, Description of responsibilities\n
+          - Projects: Project Name, Technologies used, Description\n
+          \nHere is the CV text:\n"${text}"` },
+      ],
+      max_tokens: 1000,
+      temperature: 0.2,
+      top_p: 1,
+    });
+
+    const result = response.choices[0].message.content;
+
+    console.log("API response: " + result);
+
+    return result;  // Parse the result as JSON
+
+  } catch (error) {
+    console.error("Error analyzing CV with OpenAI:", error.message);
+    throw new Error("Failed to analyze CV with OpenAI");
+  }
+}
+
+// Function to process CV content and structure the information
+export async function parseCVContent(content) {
+  const sections = {
+    personal_info: {
+      name: "-",
+      email: "-",
+      phone: "-",
+      address: "-",
+      nic: "-",
+      linkedin: "-",
+      github: "-",
+    },
+    education: [],
+    experience: [],
+    projects: [],
+  };
+
+  try {
+    console.log("Here is the content passing to parseCVContent", content);
+
+    // Extract text from the uploaded file (e.g., PDF or Word file)
+    const fileText = await extractTextFromFile(content);
+
+    // Analyze text with ChatGPT
+    const structuredData = await analyzeCVWithChatGPT(fileText);
+
+    console.log("Structured CV data:", structuredData);  // Log the structured data for debugging
+
+    // Ensure the structured data has values
+    if (structuredData && structuredData.personal_info) {
+      sections.personal_info = structuredData.personal_info;
+    }
+    if (structuredData && structuredData.education) {
+      sections.education = structuredData.education;
+    }
+    if (structuredData && structuredData.experience) {
+      sections.experience = structuredData.experience;
+    }
+    if (structuredData && structuredData.projects) {
+      sections.projects = structuredData.projects;
+    }
+
+  } catch (error) {
+    console.error("Error parsing CV content:", error.message);
+    throw new Error("Failed to parse CV content");
+  }
+
+  return sections;
+}
+
+async function extractTextFromFile(content) {
+  if (content.type === "application/pdf") {
+    const pdfBuffer = Buffer.from(content.buffer, 'base64');
+    const pdfText = await pdfParse(pdfBuffer);
+    return pdfText.text;
+  }
+
+  if (content.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    const wordBuffer = Buffer.from(content.buffer, 'base64');
+    const wordText = await mammoth.extractRawText({ buffer: wordBuffer });
+    return wordText.value;
+  }
+
+  throw new Error("Unsupported file type");
+}
