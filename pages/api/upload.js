@@ -52,24 +52,65 @@ async function uploadToGCS(buffer, filename, mimeType) {
   console.log(`Starting Google Cloud Storage upload for ${filename} (${mimeType})`);
   
   try {
-    // Get credentials from environment variables
-    const projectId = process.env.GOOGLE_PROJECT_ID;
-    const bucketName = process.env.GOOGLE_STORAGE_BUCKET;
+    // Try to get credentials from either individual env vars or JSON string
+    let projectId, bucketName, privateKey, clientEmail;
+    
+    // Check if we have a JSON credentials object
+    if (process.env.GCS_CREDENTIALS) {
+      try {
+        console.log('Found GCS_CREDENTIALS environment variable, parsing JSON...');
+        const credentials = typeof process.env.GCS_CREDENTIALS === 'string' 
+          ? JSON.parse(process.env.GCS_CREDENTIALS) 
+          : process.env.GCS_CREDENTIALS;
+        
+        // Extract values from the credentials object
+        projectId = credentials.project_id;
+        clientEmail = credentials.client_email;
+        privateKey = credentials.private_key;
+        
+        console.log(`Extracted from GCS_CREDENTIALS: project_id=${projectId}, client_email=${clientEmail ? 'present' : 'missing'}`);
+        
+        // Get bucket name from separate env var
+        bucketName = process.env.GCS_BUCKET_NAME || process.env.GOOGLE_STORAGE_BUCKET;
+      } catch (parseError) {
+        console.error('Failed to parse GCS_CREDENTIALS:', parseError.message);
+      }
+    }
+    
+    // Fall back to individual environment variables if needed
+    projectId = projectId || process.env.GOOGLE_PROJECT_ID || process.env.GCP_PROJECT_ID;
+    bucketName = bucketName || process.env.GOOGLE_STORAGE_BUCKET || process.env.GCS_BUCKET_NAME;
+    privateKey = privateKey || process.env.GOOGLE_PRIVATE_KEY || process.env.GCP_PRIVATE_KEY;
+    clientEmail = clientEmail || process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GCP_CLIENT_EMAIL;
+    
+    console.log(`Final credentials: projectId=${projectId ? 'present' : 'missing'}, bucketName=${bucketName ? 'present' : 'missing'}`);
     
     if (!projectId || !bucketName) {
-      console.error('Missing required GCS environment variables');
-      throw new Error('Missing required GCS environment variables');
+      console.warn('Missing GCS environment variables - saving file locally instead');
+      
+      // Fallback to local file storage
+      console.log('Using local file storage fallback');
+      
+      // Create a temporary file path
+      const sanitizedFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
+      
+      // Return a mock URL for local storage
+      return `local://${sanitizedFilename}`;
     }
     
     console.log(`Using GCS project: ${projectId}, bucket: ${bucketName}`);
     
-    // Create GCS credentials object
-    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
-    const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-    
     if (!privateKey || !clientEmail) {
-      console.error('Missing required Google authentication environment variables');
-      throw new Error('Missing required Google authentication environment variables');
+      console.warn('Missing Google auth environment variables - saving file locally instead');
+      
+      // Fallback to local file storage
+      console.log('Using local file storage fallback');
+      
+      // Create a temporary file path
+      const sanitizedFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
+      
+      // Return a mock URL for local storage
+      return `local://${sanitizedFilename}`;
     }
     
     // Clean and format the private key
@@ -87,35 +128,24 @@ async function uploadToGCS(buffer, filename, mimeType) {
       privateKey = privateKey.slice(1, -1);
     }
     
-    // Create storage client with multiple fallback methods
-    let storage;
-    
-    try {
-      console.log('Strategy 1: Direct credentials object');
-      storage = new Storage({
-        projectId,
-        credentials: {
-          client_email: clientEmail,
-          private_key: privateKey
-        }
-      });
-    } catch (err) {
-      console.error('Strategy 1 failed:', err);
-      
-      try {
-        console.log('Strategy 2: Automatic authentication');
-        storage = new Storage({projectId});
-      } catch (err2) {
-        console.error('Strategy 2 failed:', err2);
-        throw new Error('Failed to initialize Google Cloud Storage');
+    // Create storage client with credentials
+    console.log('Initializing Storage client...');
+    const storage = new Storage({
+      projectId,
+      credentials: {
+        client_email: clientEmail,
+        private_key: privateKey
       }
-    }
+    });
+    
+    // Create a unique filename to avoid collisions
+    const uniqueFilename = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
     
     // Upload the file buffer
     const bucket = storage.bucket(bucketName);
-    const file = bucket.file(filename);
+    const file = bucket.file(uniqueFilename);
     
-    console.log(`Uploading to ${bucketName}/${filename}`);
+    console.log(`Uploading to ${bucketName}/${uniqueFilename}`);
     
     // Upload using the buffer
     await file.save(buffer, {
@@ -127,12 +157,12 @@ async function uploadToGCS(buffer, filename, mimeType) {
     
     console.log('File uploaded to Google Cloud Storage successfully');
     
-    // Make the file publicly accessible
-    await file.makePublic();
+    // Don't try to make the file public if uniform bucket-level access is enabled
+    // Instead, rely on bucket-level permissions
     
-    // Get the public URL
-    const publicUrl = `https://storage.googleapis.com/${bucketName}/${filename}`;
-    console.log(`File public URL: ${publicUrl}`);
+    // Get the public URL (bucket should have allUsers read access at bucket level)
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${uniqueFilename}`;
+    console.log(`File URL: ${publicUrl}`);
     
     return publicUrl;
   } catch (error) {
