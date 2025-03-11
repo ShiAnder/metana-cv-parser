@@ -1,0 +1,42 @@
+{
+  "name": "metana-cv-parser",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.15.2",
+    "aws-sdk": "^2.1692.0",
+    "axios": "^1.8.2",
+    "dotenv": "^16.4.7",
+    "file-type": "^20.4.0",
+    "formidable": "^3.5.2",
+    "google-spreadsheet": "^4.1.4",
+    "googleapis": "^146.0.0",
+    "ibm-watson": "^10.0.0",
+    "mammoth": "^1.9.0",
+    "next": "15.2.1",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.86.2",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "spacy": "^0.0.4"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9",
+    "eslint-config-next": "15.2.1",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}
